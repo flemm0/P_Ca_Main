@@ -1,0 +1,52 @@
+---
+title: "Prostate Cancer RNASeq Analysis Between African Americans and Causasian Americans:"
+author: "Flemming Wu"
+---
+
+```{r}
+setwd("C:/Users/flemm/velvilab/P_Ca_Analysis_012723")
+```
+
+
+```{r load libs, message = FALSE}
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(stringr)
+library(RUVSeq)
+```
+
+```{r}
+metadata <- read_xlsx("./RNAseq_Samples_012723.xlsx")
+data <- read_xlsx("./Data_012723.xlsx")
+```
+
+```{r change rownames}
+#head(data) ## gene id columns are redundant, make them the rownames and remove columns
+data <- column_to_rownames(data, var = "Geneid...1")
+data <- select(data, -starts_with("Geneid"))
+```
+
+```{r change column names}
+# metadata %>%
+#   select(MGC_Sample_ID, KGP_Sample_ID) %>%
+#   mutate(KGP_Sample_ID = str_extract(KGP_Sample_ID, "00[:digit:]{2}") %>% str_replace("00[0]?", "RNA")) # numbers of KGP match numbers of MGC
+
+new.names <- metadata %>%
+  select(MGC_Sample_ID, KGP_Sample_ID, `Tissue Type`, Race) %>%
+  mutate(KGP_Sample_ID = str_extract(KGP_Sample_ID, "00[:digit:]{2}") %>% str_replace("00[0]?", "RNA")) %>%
+  mutate(`Tissue Type` = ifelse(`Tissue Type` == "Malignant", "M", "N"), Race = ifelse(Race == "Black", "B", "W")) %>%
+  unite(id, c("Tissue Type", "Race", "MGC_Sample_ID")) %>%
+  arrange(as.integer(str_extract(KGP_Sample_ID, "[:digit:]{1,2}"))) %>%
+  select(id) %>%
+  as.list()
+
+names(data) <- new.names$id
+```
+
+```{r}
+head(data)
+```
+
+
