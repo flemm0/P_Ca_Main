@@ -10,43 +10,232 @@ setwd("C:/Users/flemm/velvilab/P_Ca_Analysis_012723")
 
 ```{r load libs, message = FALSE}
 library(readxl)
-library(dplyr)
-library(tidyr)
+library(tidyverse)
 library(tibble)
 library(stringr)
 library(RUVSeq)
+library(ggplot2)
+library(RColorBrewer)
+library(DESeq2)
+library(EnsDb.Hsapiens.v86)
+library(EnhancedVolcano)
 ```
 
-```{r}
+```{r message=FALSE}
 metadata <- read_xlsx("./RNAseq_Samples_012723.xlsx")
 data <- read_xlsx("./Data_012723.xlsx")
 ```
 
+```{r}
+dim(data) #58780 genes in 20 samples
+```
+
+
 ```{r change rownames}
 #head(data) ## gene id columns are redundant, make them the rownames and remove columns
 data <- column_to_rownames(data, var = "Geneid...1")
-data <- select(data, -starts_with("Geneid"))
+data <- dplyr::select(data, -starts_with("Geneid"))
 ```
 
 ```{r change column names}
-# metadata %>%
-#   select(MGC_Sample_ID, KGP_Sample_ID) %>%
-#   mutate(KGP_Sample_ID = str_extract(KGP_Sample_ID, "00[:digit:]{2}") %>% str_replace("00[0]?", "RNA")) # numbers of KGP match numbers of MGC
-
 new.names <- metadata %>%
-  select(MGC_Sample_ID, KGP_Sample_ID, `Tissue Type`, Race) %>%
   mutate(KGP_Sample_ID = str_extract(KGP_Sample_ID, "00[:digit:]{2}") %>% str_replace("00[0]?", "RNA")) %>%
   mutate(`Tissue Type` = ifelse(`Tissue Type` == "Malignant", "M", "N"), Race = ifelse(Race == "Black", "B", "W")) %>%
   unite(id, c("Tissue Type", "Race", "MGC_Sample_ID")) %>%
   arrange(as.integer(str_extract(KGP_Sample_ID, "[:digit:]{1,2}"))) %>%
-  select(id) %>%
+  dplyr::select(id) %>%
   as.list()
 
 names(data) <- new.names$id
 ```
 
-```{r}
-head(data)
+```{r split by comparisons}
+#head(table(rowMeans(data)), 20)
+#head(table(rowSums(data)), 20) # 18,082 genes have 0 expression across all samples
+
+## split data for all comparisons
+
+# Nonmalignant black vs malignant black
+nb_mb <- data %>% select_if(grepl("N_B", names(.)) | grepl("M_B", names(.)))
+# Nonmalignant black vs malignant white
+nb_mw <- data %>% select_if(grepl("N_B", names(.)) | grepl("M_W", names(.)))
+# Nonmalignant black vs nonmalignant white
+nb_nw <- data %>% select_if(grepl("N_B", names(.)) | grepl("N_W", names(.)))
+# Malignant black vs malignant white
+mb_mw <- data %>% select_if(grepl("M_B", names(.)) | grepl("M_W", names(.)))
+# Malignant black vs nonmalignant white
+mb_nw <- data %>% select_if(grepl("M_B", names(.)) | grepl("N_W", names(.)))
+# Malignant white vs nonmalignant white
+mw_nw <- data %>% select_if(grepl("M_W", names(.)) | grepl("N_W", names(.)))
+
+## combine into list of datasets
+all.dfs <- list("nb_mb" = nb_mb, "nb_mw" = nb_mw, "nb_nw" = nb_nw, "mb_mw" = mb_mw, "mb_nw" = mb_nw, "mw_nw" = mw_nw)
 ```
 
+```{r}
+# require more than 5 reads in at least 3 samples from each comparison
+all.dfs.filt <- lapply(all.dfs, function(df) df[apply(df, 1, function(x) length(x[x>5])>=3), ])
+```
+
+
+```{r}
+make_sets <- function(df) {
+  x <- names(df) %>% str_extract("[MN]_[WB]") %>% as.factor()
+  set <- newSeqExpressionSet(as.matrix(df), phenoData = data.frame(x, row.names = colnames(df)))
+  return(set)
+}
+
+all.sets <- lapply(all.dfs.filt, function(x) make_sets(x))
+```
+
+
+```{r initial plots}
+plot_sets <- function(set) {
+  colors <- brewer.pal(3, "Set1")
+  plotRLE(set, outline = FALSE, ylim = c(-4,4), col = colors[x])
+  plotPCA(set, col = colors[x], cex = 0.7)
+}
+lapply(all.sets, function(set) plot_sets(set))
+```
+
+Run between lane (upper quartile) normalization.
+
+```{r between lane normalization}
+all.sets.norm <- lapply(all.sets, function(set) betweenLaneNormalization(set, which = "upper"))
+
+lapply(all.sets.norm, function(set) plot_sets(set))
+```
+
+
+Create empirical negative control genes and Run DE analysis with `edgeR`
+
+
+```{r}
+est_neg_ctrl <- function(set) {
+  # Since no genes are known _a priori_ to be influenced by covariates of interest, use least significantly DE genes as "in-silico empirical" negative controls.
+  x <- set$x
+  design <- model.matrix(~x, data = pData(set))
+  y <- DGEList(counts = counts(set), group = x)
+  y <- calcNormFactors(y, method = "upperquartile")
+  y <- estimateGLMCommonDisp(y, design)
+  y <- estimateGLMTagwiseDisp(y, design)
+
+  fit <- glmFit(y, design)
+  lrt <- glmLRT(fit, coef = 2)
+
+  top <- topTags(lrt, n = nrow(set))$table
+  empirical <- rownames(set)[which(!(rownames(set) %in% rownames(top)[1:5000]))]
+  
+  # run RUVg
+  newset <- RUVg(set, empirical, k = 1)
+  return(newset)
+}
+
+
+run_glmLRT <- function(newset) {
+  # Rerun edgeR with newly obtained negative controls
+  x <- newset$x
+  design <- model.matrix(~x + W_1, data = pData(newset))
+  y <- DGEList(counts = counts(newset), group = x)
+  y <- calcNormFactors(y, method = "upperquartile")
+  y <- estimateGLMCommonDisp(y, design)
+  y <- estimateGLMTagwiseDisp(y, design)
+
+  fit <- glmFit(y, design)
+  lrt <- glmLRT(fit, coef=2)
+  return(lrt)
+}
+
+
+################
+
+
+
+all.sets.norm.nc <- lapply(all.sets.norm, est_neg_ctrl)
+all.res <- lapply(all.sets.norm.nc, run_glmLRT)
+
+all.tables <- lapply(all.res, function(x) return(x$table))
+```
+
+
+
+```{r}
+add_gene_sym <- function(df) {
+  # remove "." from ensembl gene id
+  rownames(df) <- sub("\\.[0-9]*$", "", rownames(df))
+  # map ensembl geneid to gene symbol
+  geneids <- select(x = EnsDb.Hsapiens.v86,  key=rownames(df), columns=c("SYMBOL"), keytype="GENEID")
+  rownames(geneids) <- geneids$GENEID
+  
+  # merge mapping back to original dataframe
+  df <- merge(x = df, y = geneids, by = "row.names", all = TRUE)
+  column_to_rownames(df, var = "Row.names")
+  
+  return(df)
+}
+
+all.tables.sym <- lapply(all.tables, add_gene_sym)
+```
+
+```{r}
+lapply(all.tables.sym, head)
+```
+
+
+```{r fig.height=6}
+lapply(names(all.tables.sym), function(x) EnhancedVolcano(all.res.sym[[x]], x = "logFC", y = "PValue", lab = all.res.sym[[x]]$SYMBOL,
+                                                       title = x %>%
+                                                         str_replace_all("n", "Non-Malignant ") %>%
+                                                         str_replace_all("m", "Malignant ") %>%
+                                                         str_replace_all("b", "African-American") %>%
+                                                         str_replace_all("w", "Caucasian-American") %>%
+                                                         str_replace_all("_", " -VS- "),
+                                                       subtitle = "p-value cutoff: 0.05 | log2-fold change cutoff: 1", col = c("gray", "red2", "yellow1", "blue3")
+                                                       ))
+```
+
+```{r}
+plotMD.DGEList(all.res$nb_mb)
+```
+
+
+```{r}
+invisible(lapply(all.res, plotSmear, de.tags = "glmLRT", lowess = TRUE, main = "MA Plot"))
+```
+
+
+
+
+
+---
+
+`DESeq2`
+
+
+```{r perform DESeq2 analysis}
+## create DESeq Dataset Object
+dds <- DESeqDataSetFromMatrix(countData = counts(set2), colData = pData(set2), design = ~W_1 + x)
+## Run DESeq and assign results to res
+dds <- DESeq(dds)
+res <- results(dds)
+```
+
+
+```{r convert ensembl id to gene symbol}
+res.df <- as.data.frame(res)
+
+# remove decimal points (version number) from ensembl ids, which causes error when converting to gene symbols
+ensemblids <- sub("\\.[0-9]*$", "", rownames(res.df))
+rownames(res.df) <- sub("\\.[0-9]*$", "", rownames(res.df))
+
+geneids <- select(x = EnsDb.Hsapiens.v86,  key=ensemblids, columns=c("SYMBOL"), keytype="GENEID")
+rownames(geneids) <- geneids$GENEID
+
+
+# create column for gene symbol
+res.df <- merge(x = res.df, y = geneids, by = "row.names", all = TRUE)
+
+column_to_rownames(res.df, var = "Row.names")
+
+```
 
