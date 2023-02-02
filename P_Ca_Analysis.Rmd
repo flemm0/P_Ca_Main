@@ -89,8 +89,9 @@ all.sets <- lapply(all.dfs.filt, function(x) make_sets(x))
 ```
 
 
-```{r initial plots}
+```{r initial plots, fig.width=3, fig.height=2}
 plot_sets <- function(set) {
+  x <- set$x
   colors <- brewer.pal(3, "Set1")
   plotRLE(set, outline = FALSE, ylim = c(-4,4), col = colors[x])
   plotPCA(set, col = colors[x], cex = 0.7)
@@ -100,7 +101,7 @@ lapply(all.sets, function(set) plot_sets(set))
 
 Run between lane (upper quartile) normalization.
 
-```{r between lane normalization}
+```{r between lane normalization, fig.width=3, fig.height=2}
 all.sets.norm <- lapply(all.sets, function(set) betweenLaneNormalization(set, which = "upper"))
 
 lapply(all.sets.norm, function(set) plot_sets(set))
@@ -183,7 +184,7 @@ lapply(all.tables.sym, head)
 
 
 ```{r fig.height=6}
-lapply(names(all.tables.sym), function(x) EnhancedVolcano(all.res.sym[[x]], x = "logFC", y = "PValue", lab = all.res.sym[[x]]$SYMBOL,
+lapply(names(all.tables.sym), function(x) EnhancedVolcano(all.tables.sym[[x]], x = "logFC", y = "PValue", lab = all.tables.sym[[x]]$SYMBOL,
                                                        title = x %>%
                                                          str_replace_all("n", "Non-Malignant ") %>%
                                                          str_replace_all("m", "Malignant ") %>%
@@ -241,7 +242,7 @@ all.deseq.res.sym <- lapply(all.deseq.res, add_gene_sym)
 
 
 ```{r, fig.height=5}
-lapply(names(all.deseq.res.sym), function(x) EnhancedVolcano(all.deseq.res.sym[[x]], x = "log2FoldChange", y = "padj", lab = all.res.sym[[x]]$SYMBOL,
+lapply(names(all.deseq.res.sym), function(x) EnhancedVolcano(all.deseq.res.sym[[x]], x = "log2FoldChange", y = "padj", lab = all.deseq.res.sym[[x]]$SYMBOL,
                                                        title = x %>%
                                                          str_replace_all("n", "Non-Malignant ") %>%
                                                          str_replace_all("m", "Malignant ") %>%
