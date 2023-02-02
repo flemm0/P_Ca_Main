@@ -194,13 +194,17 @@ lapply(names(all.tables.sym), function(x) EnhancedVolcano(all.res.sym[[x]], x = 
                                                        ))
 ```
 
-```{r}
-plotMD.DGEList(all.res$nb_mb)
-```
 
 
-```{r}
-invisible(lapply(all.res, plotSmear, de.tags = "glmLRT", lowess = TRUE, main = "MA Plot"))
+```{r fig.height=6}
+#invisible(lapply(all.res, plotSmear, de.tags = "glmLRT", lowess = FALSE, main = "MA Plot"))
+
+invisible(lapply(names(all.res), function(x) {plotSmear(all.res[[x]], main = x %>%
+                                                         str_replace_all("n", "Non-Malignant ") %>%
+                                                         str_replace_all("m", "Malignant ") %>%
+                                                         str_replace_all("b", "African-American") %>%
+                                                         str_replace_all("w", "Caucasian-American") %>%
+                                                         str_replace_all("_", " -VS- "))}))
 ```
 
 
@@ -209,33 +213,43 @@ invisible(lapply(all.res, plotSmear, de.tags = "glmLRT", lowess = TRUE, main = "
 
 ---
 
+
+
+
+
 `DESeq2`
 
+```{r Run DESeq2, message=FALSE}
+run_DESeq <- function(set) {
+  x <- set$x
+  dds <- DESeqDataSetFromMatrix(countData = counts(set), colData = pData(set), design = ~W_1 + x)
+  dds <- DESeq(dds)
+  res <- results(dds)
+  return(res)
+}
 
-```{r perform DESeq2 analysis}
-## create DESeq Dataset Object
-dds <- DESeqDataSetFromMatrix(countData = counts(set2), colData = pData(set2), design = ~W_1 + x)
-## Run DESeq and assign results to res
-dds <- DESeq(dds)
-res <- results(dds)
+all.deseq.res <- lapply(all.sets.norm.nc, run_DESeq)
+```
+
+```{r}
+## convert to data frame
+all.deseq.res <- lapply(all.deseq.res, as.data.frame)
+
+## add gene symbols
+all.deseq.res.sym <- lapply(all.deseq.res, add_gene_sym)
 ```
 
 
-```{r convert ensembl id to gene symbol}
-res.df <- as.data.frame(res)
-
-# remove decimal points (version number) from ensembl ids, which causes error when converting to gene symbols
-ensemblids <- sub("\\.[0-9]*$", "", rownames(res.df))
-rownames(res.df) <- sub("\\.[0-9]*$", "", rownames(res.df))
-
-geneids <- select(x = EnsDb.Hsapiens.v86,  key=ensemblids, columns=c("SYMBOL"), keytype="GENEID")
-rownames(geneids) <- geneids$GENEID
-
-
-# create column for gene symbol
-res.df <- merge(x = res.df, y = geneids, by = "row.names", all = TRUE)
-
-column_to_rownames(res.df, var = "Row.names")
-
+```{r, fig.height=5}
+lapply(names(all.deseq.res.sym), function(x) EnhancedVolcano(all.deseq.res.sym[[x]], x = "log2FoldChange", y = "padj", lab = all.res.sym[[x]]$SYMBOL,
+                                                       title = x %>%
+                                                         str_replace_all("n", "Non-Malignant ") %>%
+                                                         str_replace_all("m", "Malignant ") %>%
+                                                         str_replace_all("b", "African-American") %>%
+                                                         str_replace_all("w", "Caucasian-American") %>%
+                                                         str_replace_all("_", " -VS- "),
+                                                       subtitle = "p-value cutoff: 0.05 | log2-fold change cutoff: 1", col = c("gray", "red2", "yellow1", "blue3")
+                                                       ))
 ```
+
 
