@@ -1,15 +1,19 @@
 ---
-title: "Prostate Cancer RNASeq Analysis Between African Americans and Causasian Americans:"
+title: 'Prostate Cancer RNASeq Analysis Between African Americans and Causasian Americans:'
 author: "Flemming Wu"
 ---
 
-```{r}
+```{r include=FALSE}
 setwd("C:/Users/flemm/velvilab/P_Ca_Analysis_012723")
 ```
 
+### Load libraries
 
 ```{r load libs, message = FALSE}
 library(readxl)
+library(openxlsx)
+library(magrittr)
+library(purrr)
 library(tidyverse)
 library(tibble)
 library(stringr)
@@ -19,7 +23,11 @@ library(RColorBrewer)
 library(DESeq2)
 library(EnsDb.Hsapiens.v86)
 library(EnhancedVolcano)
+library(clusterProfiler)
+library(org.Hs.eg.db)
 ```
+
+### Read in and process data
 
 ```{r message=FALSE}
 metadata <- read_xlsx("./RNAseq_Samples_012723.xlsx")
@@ -29,7 +37,6 @@ data <- read_xlsx("./Data_012723.xlsx")
 ```{r}
 dim(data) #58780 genes in 20 samples
 ```
-
 
 ```{r change rownames}
 #head(data) ## gene id columns are redundant, make them the rownames and remove columns
@@ -48,6 +55,8 @@ new.names <- metadata %>%
 
 names(data) <- new.names$id
 ```
+
+### Split data by comparisons
 
 ```{r split by comparisons}
 #head(table(rowMeans(data)), 20)
@@ -71,6 +80,8 @@ mw_nw <- data %>% select_if(grepl("M_W", names(.)) | grepl("N_W", names(.)))
 ## combine into list of datasets
 all.dfs <- list("nb_mb" = nb_mb, "nb_mw" = nb_mw, "nb_nw" = nb_nw, "mb_mw" = mb_mw, "mb_nw" = mb_nw, "mw_nw" = mw_nw)
 ```
+
+### Remove unwanted variation with `RUVg`
 
 ```{r}
 # require more than 5 reads in at least 3 samples from each comparison
@@ -96,19 +107,20 @@ plot_sets <- function(set) {
   plotRLE(set, outline = FALSE, ylim = c(-4,4), col = colors[x])
   plotPCA(set, col = colors[x], cex = 0.7)
 }
-lapply(all.sets, function(set) plot_sets(set))
+
+#lapply(all.sets, function(set) plot_sets(set))
 ```
 
-Run between lane (upper quartile) normalization.
+#### Run between lane (upper quartile) normalization.
 
 ```{r between lane normalization, fig.width=3, fig.height=2}
 all.sets.norm <- lapply(all.sets, function(set) betweenLaneNormalization(set, which = "upper"))
 
-lapply(all.sets.norm, function(set) plot_sets(set))
+#lapply(all.sets.norm, function(set) plot_sets(set))
 ```
 
 
-Create empirical negative control genes and Run DE analysis with `edgeR`
+### Create empirical negative control genes and Run DE analysis with `edgeR`
 
 
 ```{r}
@@ -165,7 +177,7 @@ add_gene_sym <- function(df) {
   # remove "." from ensembl gene id
   rownames(df) <- sub("\\.[0-9]*$", "", rownames(df))
   # map ensembl geneid to gene symbol
-  geneids <- select(x = EnsDb.Hsapiens.v86,  key=rownames(df), columns=c("SYMBOL"), keytype="GENEID")
+  geneids <- ensembldb::select(x = EnsDb.Hsapiens.v86,  key=rownames(df), columns=c("SYMBOL"), keytype="GENEID")
   rownames(geneids) <- geneids$GENEID
   
   # merge mapping back to original dataframe
@@ -182,8 +194,66 @@ all.tables.sym <- lapply(all.tables, add_gene_sym)
 lapply(all.tables.sym, head)
 ```
 
+```{r write results to excel}
+## write results to excel workbook
 
-```{r fig.height=6}
+
+## function to filter data based on pvalue cutoffs
+get_sig_genes <- function(df, p_cutoff) {
+  df <- df %>%
+    column_to_rownames("Row.names") %>%
+    dplyr::select(-c(GENEID)) %>%
+    dplyr::filter(PValue < p_cutoff)
+  return(df)
+}
+
+genes.05 <- lapply(all.tables.sym, get_sig_genes, 0.05)
+genes.01 <- lapply(all.tables.sym, get_sig_genes, 0.01)
+genes.001 <- lapply(all.tables.sym, get_sig_genes, 0.001)
+
+if(!file.exists("gene_lists/genes_0.05.xlsx") & !file.exists("gene_lists/genes_0.01.xlsx") & !file.exists("gene_lists/genes_0.001.xlsx")) {
+  write.xlsx(genes.05, file = "./gene_lists/genes_0.05.xlsx")
+  write.xlsx(genes.01, file = "./gene_lists/genes_0.01.xlsx")
+  write.xlsx(genes.001, file = "gene_lists/genes_0.001.xlsx")
+}
+```
+
+
+## Pathway Analysis
+
+```{r, eval=FALSE, include=FALSE}
+#lapply(genes.05, nrow) ## too many genes (998 - 1927)
+#lapply(genes.01, nrow) ## 0.01 p-value cutoff gives good amount of genes (301 - 856)
+#lapply(genes.001, nrow) ## too few genes (75 - 336)
+
+
+#############
+
+
+## to create named gene list vector
+#d <- genes.01$nb_mb %>%
+#  arrange(desc(abs(logFC))) %>%
+#  select(SYMBOL, logFC)
+
+#geneList <- d[,2]
+#names(geneList) <- d[,1]
+#geneList
+
+#enrichGO(gene = names(geneList), OrgDb = org.Hs.eg.db, keyType = "SYMBOL")
+##
+
+#res <- enrichGO(gene = rownames(genes.01$nb_mb), OrgDb = org.Hs.eg.db, keyType = "ENSEMBL")
+res <- gseGO(gene = sort(geneList, decreasing = TRUE), OrgDb = org.Hs.eg.db, keyType = "SYMBOL")
+res
+
+res <- enrichKEGG(gene = genes.01$nb_mb$SYMBOL, organism = "hsa", keyType = "ncbi-geneid")
+```
+
+
+## Volcano Plots
+
+
+```{r fig.height=6, fig.width=8}
 lapply(names(all.tables.sym), function(x) EnhancedVolcano(all.tables.sym[[x]], x = "logFC", y = "PValue", lab = all.tables.sym[[x]]$SYMBOL,
                                                        title = x %>%
                                                          str_replace_all("n", "Non-Malignant ") %>%
