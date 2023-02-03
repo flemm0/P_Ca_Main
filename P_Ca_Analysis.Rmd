@@ -58,16 +58,23 @@ names(data) <- new.names$id
 
 ### Split data by comparisons
 
+*reference level (control) in design matrix is the first level of the factor variable, which is the level with the lowest number or letter among the values provided*
+
 ```{r split by comparisons}
 #head(table(rowMeans(data)), 20)
 #head(table(rowSums(data)), 20) # 18,082 genes have 0 expression across all samples
 
 ## split data for all comparisons
 
-# Nonmalignant black vs malignant black
-nb_mb <- data %>% select_if(grepl("N_B", names(.)) | grepl("M_B", names(.)))
-# Nonmalignant black vs malignant white
-nb_mw <- data %>% select_if(grepl("N_B", names(.)) | grepl("M_W", names(.)))
+
+### since the reference group in the design matrix is assigned by the level with the lowest number or letter among the values provided, I named the groups to match accordingly
+## ex: mb_nb = Nonmalignant black (reference) vs nonmalignant black (comparison), since m comes before n
+
+
+# Nonnmalignant black vs malignant black
+mb_nb <- data %>% select_if(grepl("M_B", names(.)) | grepl("N_B", names(.)))
+# Walignant white vs nonmalignant black
+mw_nb <- data %>% select_if(grepl("M_W", names(.)) | grepl("N_B", names(.)))
 # Nonmalignant black vs nonmalignant white
 nb_nw <- data %>% select_if(grepl("N_B", names(.)) | grepl("N_W", names(.)))
 # Malignant black vs malignant white
@@ -78,7 +85,7 @@ mb_nw <- data %>% select_if(grepl("M_B", names(.)) | grepl("N_W", names(.)))
 mw_nw <- data %>% select_if(grepl("M_W", names(.)) | grepl("N_W", names(.)))
 
 ## combine into list of datasets
-all.dfs <- list("nb_mb" = nb_mb, "nb_mw" = nb_mw, "nb_nw" = nb_nw, "mb_mw" = mb_mw, "mb_nw" = mb_nw, "mw_nw" = mw_nw)
+all.dfs <- list("mb_nb" = mb_nb, "mw_nb" = mw_nb, "nb_nw" = nb_nw, "mb_mw" = mb_mw, "mb_nw" = mb_nw, "mw_nw" = mw_nw)
 ```
 
 ### Remove unwanted variation with `RUVg`
@@ -258,8 +265,8 @@ lapply(names(all.tables.sym), function(x) EnhancedVolcano(all.tables.sym[[x]], x
                                                        title = x %>%
                                                          str_replace_all("n", "Non-Malignant ") %>%
                                                          str_replace_all("m", "Malignant ") %>%
-                                                         str_replace_all("b", "African-American") %>%
-                                                         str_replace_all("w", "Caucasian-American") %>%
+                                                         str_replace_all("b", "African") %>%
+                                                         str_replace_all("w", "Caucasian") %>%
                                                          str_replace_all("_", " -VS- "),
                                                        subtitle = "p-value cutoff: 0.05 | log2-fold change cutoff: 1", col = c("gray", "red2", "yellow1", "blue3")
                                                        ))
@@ -273,8 +280,8 @@ lapply(names(all.tables.sym), function(x) EnhancedVolcano(all.tables.sym[[x]], x
 invisible(lapply(names(all.res), function(x) {plotSmear(all.res[[x]], main = x %>%
                                                          str_replace_all("n", "Non-Malignant ") %>%
                                                          str_replace_all("m", "Malignant ") %>%
-                                                         str_replace_all("b", "African-American") %>%
-                                                         str_replace_all("w", "Caucasian-American") %>%
+                                                         str_replace_all("b", "African") %>%
+                                                         str_replace_all("w", "Caucasian") %>%
                                                          str_replace_all("_", " -VS- "))}))
 ```
 
@@ -316,8 +323,8 @@ lapply(names(all.deseq.res.sym), function(x) EnhancedVolcano(all.deseq.res.sym[[
                                                        title = x %>%
                                                          str_replace_all("n", "Non-Malignant ") %>%
                                                          str_replace_all("m", "Malignant ") %>%
-                                                         str_replace_all("b", "African-American") %>%
-                                                         str_replace_all("w", "Caucasian-American") %>%
+                                                         str_replace_all("b", "African") %>%
+                                                         str_replace_all("w", "Caucasian") %>%
                                                          str_replace_all("_", " -VS- "),
                                                        subtitle = "p-value cutoff: 0.05 | log2-fold change cutoff: 1", col = c("gray", "red2", "yellow1", "blue3")
                                                        ))
