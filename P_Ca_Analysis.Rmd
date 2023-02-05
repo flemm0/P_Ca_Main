@@ -4,7 +4,8 @@ author: "Flemming Wu"
 ---
 
 ```{r include=FALSE}
-setwd("C:/Users/flemm/velvilab/P_Ca_Analysis_012723")
+if (Sys.info()["sysname"] == "Darwin") {setwd("~/Desktop/velvilab/P_Ca_Analysis")}
+if (Sys.info()["sysname"] == "Windows") {setwd("C:/Users/flemm/velvilab/P_Ca_Analysis_012723")}
 ```
 
 ### Load libraries
@@ -25,13 +26,14 @@ library(EnsDb.Hsapiens.v86)
 library(EnhancedVolcano)
 library(clusterProfiler)
 library(org.Hs.eg.db)
+library(ggpubr)
 ```
 
 ### Read in and process data
 
 ```{r message=FALSE}
-metadata <- read_xlsx("./RNAseq_Samples_012723.xlsx")
-data <- read_xlsx("./Data_012723.xlsx")
+metadata <- read_xlsx("./data/RNAseq_Samples_012723.xlsx")
+data <- read_xlsx("./data/Data_012723.xlsx")
 ```
 
 ```{r}
@@ -174,9 +176,8 @@ run_glmLRT <- function(newset) {
 all.sets.norm.nc <- lapply(all.sets.norm, est_neg_ctrl)
 all.res <- lapply(all.sets.norm.nc, run_glmLRT)
 
-all.tables <- lapply(all.res, function(x) return(x$table))
+all.tables <- lapply(all.res, function(x) return(as.data.frame(topTags(x, n = nrow(data)))))
 ```
-
 
 
 ```{r}
@@ -197,9 +198,12 @@ add_gene_sym <- function(df) {
 all.tables.sym <- lapply(all.tables, add_gene_sym)
 ```
 
+
+
 ```{r}
 lapply(all.tables.sym, head)
 ```
+
 
 ```{r write results to excel}
 ## write results to excel workbook
@@ -210,7 +214,8 @@ get_sig_genes <- function(df, p_cutoff) {
   df <- df %>%
     column_to_rownames("Row.names") %>%
     dplyr::select(-c(GENEID)) %>%
-    dplyr::filter(PValue < p_cutoff)
+    dplyr::filter(PValue < p_cutoff) %>%
+    dplyr::filter(FDR < 0.1)
   return(df)
 }
 
@@ -261,32 +266,74 @@ res <- enrichKEGG(gene = genes.01$nb_mb$SYMBOL, organism = "hsa", keyType = "ncb
 
 
 ```{r fig.height=6, fig.width=8}
-lapply(names(all.tables.sym), function(x) EnhancedVolcano(all.tables.sym[[x]], x = "logFC", y = "PValue", lab = all.tables.sym[[x]]$SYMBOL,
-                                                       title = x %>%
-                                                         str_replace_all("n", "Non-Malignant ") %>%
-                                                         str_replace_all("m", "Malignant ") %>%
-                                                         str_replace_all("b", "African") %>%
-                                                         str_replace_all("w", "Caucasian") %>%
-                                                         str_replace_all("_", " -VS- "),
-                                                       subtitle = "p-value cutoff: 0.05 | log2-fold change cutoff: 1", col = c("gray", "red2", "yellow1", "blue3")
-                                                       ))
+DoVolcanoPlot <- function(x){
+  EnhancedVolcano(all.tables.sym[[x]], 
+                  x = "logFC", 
+                  y = "PValue", 
+                  lab = all.tables.sym[[x]]$SYMBOL,
+                  title = x %>%
+                    str_replace_all("n", "Non-Malignant ") %>%
+                    str_replace_all("m", "Malignant ") %>%
+                    str_replace_all("b", "African") %>%
+                    str_replace_all("w", "Caucasian") %>%
+                    str_replace_all("_", " -VS- "),
+                  subtitle = "p-value cutoff: 0.05 | log2-fold change cutoff: 1", 
+                  col = c("gray", "#4bd0fe", "red1", "#fef84b")
+  )
+}
+
+volplots <- lapply(names(all.tables.sym), DoVolcanoPlot)
+names(volplots) <- names(all.tables.sym)
+```
+
+Save volcano plots
+```{r}
+#lapply(names(volplots), function(x) ggsave(filename=paste0("./plots/vol_", x,".jpeg"),
+#                                          plot=volplots[[x]], dpi = 800, width = 9, 
+#                                          height = 11, units = "in"))
 ```
 
 
+## MA Plots
 
-```{r fig.height=6}
-#invisible(lapply(all.res, plotSmear, de.tags = "glmLRT", lowess = FALSE, main = "MA Plot"))
+Typically, lower mean expression values will have more variability in log fold-change than the higher expression value. This results in a fanning effect of the data points as the graph moves from right to left.
 
-invisible(lapply(names(all.res), function(x) {plotSmear(all.res[[x]], main = x %>%
-                                                         str_replace_all("n", "Non-Malignant ") %>%
-                                                         str_replace_all("m", "Malignant ") %>%
-                                                         str_replace_all("b", "African") %>%
-                                                         str_replace_all("w", "Caucasian") %>%
-                                                         str_replace_all("_", " -VS- "))}))
+
+```{r MA Plots, fig.height=6, fig.width=8}
+DoMAPlot <- function(x){
+  data <- all.tables.sym[[x]] %>%
+    rename(log2FoldChange = logFC, baseMeanLog2 = logCPM, padj = PValue)
+  genenames <- all.tables.sym[[x]]$SYMBOL %>% as.vector()
+  ggmaplot(data = data, 
+           main = x %>%
+             str_replace_all("n", "Non-Malignant ") %>%
+             str_replace_all("m", "Malignant ") %>%
+             str_replace_all("b", "African") %>%
+             str_replace_all("w", "Caucasian") %>%
+             str_replace_all("_", " -VS- "),
+           fdr = 0.05, fc = 2, size = 0.4,
+           palette = c("#7AFF96", "#FF7A7A", "darkgray"),
+           genenames = genenames,
+           legend = "top", top = 20,
+           select.top.method = "padj",
+           font.label = c("bold", 9), label.rectangle = FALSE,
+           font.legend = "bold",
+           font.main = "bold",
+           xlab = "Average logCPM",
+           ggtheme = ggplot2::theme_minimal()
+           )
+}
+
+maplots <- lapply(names(all.tables.sym), DoMAPlot)
+names(maplots) <- names(all.tables.sym)
 ```
 
-
-
+Save MA plots
+```{r}
+#lapply(names(maplots), function(x) ggsave(filename=paste0("./plots/ma_", x,".jpeg"),
+#                                          plot=maplots[[x]], dpi = 800, width = 10, 
+#                                         height = 7, units = "in"))
+```
 
 
 ---
@@ -294,10 +341,7 @@ invisible(lapply(names(all.res), function(x) {plotSmear(all.res[[x]], main = x %
 
 
 
-
-`DESeq2`
-
-```{r Run DESeq2, message=FALSE}
+```{r Run DESeq2, message=FALSE, eval=FALSE, include=FALSE}
 run_DESeq <- function(set) {
   x <- set$x
   dds <- DESeqDataSetFromMatrix(countData = counts(set), colData = pData(set), design = ~W_1 + x)
@@ -307,18 +351,13 @@ run_DESeq <- function(set) {
 }
 
 all.deseq.res <- lapply(all.sets.norm.nc, run_DESeq)
-```
 
-```{r}
 ## convert to data frame
 all.deseq.res <- lapply(all.deseq.res, as.data.frame)
 
 ## add gene symbols
 all.deseq.res.sym <- lapply(all.deseq.res, add_gene_sym)
-```
 
-
-```{r, fig.height=5}
 lapply(names(all.deseq.res.sym), function(x) EnhancedVolcano(all.deseq.res.sym[[x]], x = "log2FoldChange", y = "padj", lab = all.deseq.res.sym[[x]]$SYMBOL,
                                                        title = x %>%
                                                          str_replace_all("n", "Non-Malignant ") %>%
