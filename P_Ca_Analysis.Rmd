@@ -27,6 +27,7 @@ library(EnhancedVolcano)
 library(clusterProfiler)
 library(org.Hs.eg.db)
 library(ggpubr)
+library(msigdbr)
 ```
 
 ### Read in and process data
@@ -175,13 +176,28 @@ run_glmLRT <- function(newset) {
 
 all.sets.norm.nc <- lapply(all.sets.norm, est_neg_ctrl)
 all.res <- lapply(all.sets.norm.nc, run_glmLRT)
-
-all.tables <- lapply(all.res, function(x) return(as.data.frame(topTags(x, n = nrow(data)))))
 ```
 
 
+#### Filter gene lists based on: p-val= 0.05, p-val= 0.01, p-val= 0.001, FDR: 10%
+
 ```{r}
-add_gene_sym <- function(df) {
+filterResults <- function(dgelrt, filt, thresh){
+  topTags(dgelrt, sort.by = "p.value", n = nrow(dgelrt), adjust.method = "BH") %>%
+  as.data.frame() %>%
+  filter(if (filt == "pval") PValue < thresh else FDR < thresh)
+}
+
+genes.p05 <- lapply(all.res, filterResults, "pval", 0.05)
+genes.p01 <- lapply(all.res, filterResults, "pval", 0.01)
+genes.p001 <- lapply(all.res, filterResults, "pval", 0.001)
+genes.fdr1 <- lapply(all.res, filterResults, "logfc", 0.1)
+```
+
+Add gene symbol to results
+
+```{r}
+addGeneSym <- function(df) {
   # remove "." from ensembl gene id
   rownames(df) <- sub("\\.[0-9]*$", "", rownames(df))
   # map ensembl geneid to gene symbol
@@ -189,77 +205,183 @@ add_gene_sym <- function(df) {
   rownames(geneids) <- geneids$GENEID
   
   # merge mapping back to original dataframe
-  df <- merge(x = df, y = geneids, by = "row.names", all = TRUE)
-  column_to_rownames(df, var = "Row.names")
+  df <- merge(x = df, y = geneids, by = "row.names", all = TRUE) %>%
+    column_to_rownames(var = "Row.names") %>%
+    relocate(SYMBOL, .before = logFC) %>%
+    select(!starts_with("GENEID"))
   
   return(df)
 }
 
-all.tables.sym <- lapply(all.tables, add_gene_sym)
+
+genes.p05 <- lapply(genes.p05, addGeneSym)
+genes.p01 <- lapply(genes.p01, addGeneSym)
+genes.p001 <- lapply(genes.p001, addGeneSym)
+genes.fdr1 <- lapply(genes.fdr1, addGeneSym)
 ```
 
+
+Write results to excel workbook
+
+```{r write results to excel}
+if(!file.exists("gene_lists/genes_p05.xlsx") & !file.exists("gene_lists/genes_p01.xlsx") & !file.exists("gene_lists/genes_p001.xlsx") & !file.exists("gene_lists/genes_fdr1.xlsx")) {
+  write.xlsx(genes.p05, file = "./gene_lists/genes_p05.xlsx", rowNames = TRUE)
+  write.xlsx(genes.p01, file = "./gene_lists/genes_p01.xlsx", rowNames = TRUE)
+  write.xlsx(genes.p001, file = "gene_lists/genes_p001.xlsx", rowNames = TRUE)
+  write.xlsx(genes.fdr1, file = "gene_lists/genes_fdr1.xlsx", rowNames = TRUE)
+}
+```
+
+
+## Gene Set Enrichment Analysis
+
+GO and KEGG are the most frequently used for functional analysis. They are typically the first choice because of their long-standing curation and availability for a wide range of species.
+
+In conclusion, analysing up- and downregulated genes separately is more powerful than analysing all of the DE genes together.
+
+**IT IS BETTER TO RUN GSEA ON ALL GENES, NOT ONLY OVER/UNDER EXPRESSED**
+**GSEA RANKS GENES BASED ON CERTAIN VALUE YOU PROVIDE**
+Then, this is VERY important, the result it is not that a specific pathway is up- or down-regulated, but the fact that the pathway is affected in some way by the condition that you re studying.
+https://www.biostars.org/p/449956/
+
+The GSEA algorithm does not filter the expression dataset and generally does not benefit from your filtering of the expression dataset. During the analysis, genes that are poorly expressed or that have low variance across the dataset populate the middle of the ranked gene list and the use of a weighted statistic ensures that they do not contribute to a positive enrichment score. By removing such genes from your dataset, you may actually reduce the power of the statistic.
+
+First I will perform gene set enrichment analysis on GO terms.
+
+```{r}
+### DELETE, DO NOT FILTER GENE LISTS
+
+## prepare gene lists to input to gsea
+## clusterProfiler requires a named list of logFC for input
+
+## p-value 0.05
+geneList.p05 <- lapply(names(genes.p05), function(x){
+  d <- genes.p05[[x]] %>%
+    arrange(desc(logFC)) %>%
+    select(logFC)
+  geneList <- d[,1]
+  names(geneList) <- rownames(d)
+  return(geneList)
+})
+names(geneList.p05) <- names(genes.p05)
+
+
+## p-value 0.01
+geneList.p01 <- lapply(names(genes.p01), function(x){
+  d <- genes.p01[[x]] %>%
+    arrange(desc(logFC)) %>%
+    select(logFC)
+  geneList <- d[,1]
+  names(geneList) <- rownames(d)
+  return(geneList)
+})
+names(geneList.p01) <- names(genes.p01)
+
+
+## p-value 0.001
+geneList.p001 <- lapply(names(genes.p001), function(x){
+  d <- genes.p001[[x]] %>%
+    arrange(desc(logFC)) %>%
+    select(logFC)
+  geneList <- d[,1]
+  names(geneList) <- rownames(d)
+  return(geneList)
+})
+names(geneList.p001) <- names(genes.p001)
+
+
+
+## false discovery rate 10%
+geneList.fdr1 <- lapply(names(genes.fdr1), function(x){
+  d <- genes.fdr1[[x]] %>%
+    arrange(desc(logFC)) %>%
+    select(logFC)
+  geneList <- d[,1]
+  names(geneList) <- rownames(d)
+  return(geneList)
+})
+names(geneList.fdr1) <- names(genes.fdr1)
+```
+
+### Perform GO enrichmennt analysis
 
 
 ```{r}
-lapply(all.tables.sym, head)
-```
-
-
-```{r write results to excel}
-## write results to excel workbook
-
-
-## function to filter data based on pvalue cutoffs
-get_sig_genes <- function(df, p_cutoff) {
-  df <- df %>%
-    column_to_rownames("Row.names") %>%
-    dplyr::select(-c(GENEID)) %>%
-    dplyr::filter(PValue < p_cutoff) %>%
-    dplyr::filter(FDR < 0.1)
-  return(df)
+## functions to run gseGO with different params
+rungseGOstd <- function(geneList){
+  return(gseGO(geneList, ont = "ALL", keyType = "ENSEMBL", OrgDb = org.Hs.eg.db, nPermSimple = 10000, eps = 1e-300, scoreType = "std"))
 }
 
-genes.05 <- lapply(all.tables.sym, get_sig_genes, 0.05)
-genes.01 <- lapply(all.tables.sym, get_sig_genes, 0.01)
-genes.001 <- lapply(all.tables.sym, get_sig_genes, 0.001)
+rungseGOup <- function(geneList){
+  return(gseGO(geneList, ont = "ALL", keyType = "ENSEMBL", OrgDb = org.Hs.eg.db, nPermSimple = 10000, eps = 0, scoreType = "pos"))
+}
 
-if(!file.exists("gene_lists/genes_0.05.xlsx") & !file.exists("gene_lists/genes_0.01.xlsx") & !file.exists("gene_lists/genes_0.001.xlsx")) {
-  write.xlsx(genes.05, file = "./gene_lists/genes_0.05.xlsx")
-  write.xlsx(genes.01, file = "./gene_lists/genes_0.01.xlsx")
-  write.xlsx(genes.001, file = "gene_lists/genes_0.001.xlsx")
+rungseGOdn <- function(geneList){
+  return(gseGO(geneList, ont = "ALL", keyType = "ENSEMBL", OrgDb = org.Hs.eg.db, nPermSimple = 10000, eps = 0, scoreType = "neg"))
 }
 ```
 
+```{r}
+## calculate logFC * pvalue for ranking statistic
+gsea.input <- lapply(all.res, function(x) topTags(x, n = nrow(x)) %>% as.data.frame %>% mutate(stat = logFC*PValue) %>% arrange(-stat))
 
-## Pathway Analysis
-
-```{r, eval=FALSE, include=FALSE}
-#lapply(genes.05, nrow) ## too many genes (998 - 1927)
-#lapply(genes.01, nrow) ## 0.01 p-value cutoff gives good amount of genes (301 - 856)
-#lapply(genes.001, nrow) ## too few genes (75 - 336)
-
-
-#############
-
-
-## to create named gene list vector
-#d <- genes.01$nb_mb %>%
-#  arrange(desc(abs(logFC))) %>%
-#  select(SYMBOL, logFC)
-
-#geneList <- d[,2]
-#names(geneList) <- d[,1]
-#geneList
-
-#enrichGO(gene = names(geneList), OrgDb = org.Hs.eg.db, keyType = "SYMBOL")
-##
-
-#res <- enrichGO(gene = rownames(genes.01$nb_mb), OrgDb = org.Hs.eg.db, keyType = "ENSEMBL")
-res <- gseGO(gene = sort(geneList, decreasing = TRUE), OrgDb = org.Hs.eg.db, keyType = "SYMBOL")
-res
-
-res <- enrichKEGG(gene = genes.01$nb_mb$SYMBOL, organism = "hsa", keyType = "ncbi-geneid")
+## created named list
+gsea.input$mb_nb %>% rownames_to_column()
 ```
+
+
+## Perform gene set enrichment analyses on only up or only downregulated genes
+
+```{r, eval=FALSE, include = FALSE}
+
+## separate list of up and down regulated genes
+geneList.p05up <- lapply(geneList.p05, function(x) x[x > 0])
+geneList.p05dn <- lapply(geneList.p05, function(x) x[x < 0])
+geneList.p01up <- lapply(geneList.p01, function(x) x[x > 0])
+geneList.p01dn <- lapply(geneList.p01, function(x) x[x > 0])
+geneList.p001up <- lapply(geneList.p001, function(x) x[x > 0])
+geneList.p001dn <- lapply(geneList.p001, function(x) x[x < 0])
+geneList.fdr1up <- lapply(geneList.fdr1, function(x) x[x > 0])
+geneList.fdr1dn <- lapply(geneList.fdr1, function(x) x[x < 0])
+
+
+ego.p05up <- lapply(geneList.p05up, rungseGOup)
+ego.p05dn <- lapply(geneList.p05dn, rungseGOdn)
+
+ego.p05up.std <- lapply(geneList.p01up, rungseGOstd)
+
+lapply(ego.p05up, function(x) x@result) # returns 0 significantly enriched pathways
+lapply(ego.p05dn, function(x) x@result) # returns only 1 significantly enriched pathways
+```
+
+
+## trying `fgsea`
+
+```{r}
+#msigdbr_collections()
+```
+
+
+```{r}
+library(fgsea)
+genes.fdr1$nb_nw %>%
+  select(SYMBOL, LR) %>%
+  deframe()
+
+msigdbr_df <- msigdbr(species = "Homo sapiens", category = "C5")
+msigdbr_list <- split(x = msigdbr_df$ensembl_gene, f = msigdbr_df$gs_name)
+
+fgsea(pathways = msigdbr_list, 
+      stats = genes.fdr1$nb_nw %>%
+        rownames_to_column("ENSEMBL") %>%
+        select(ENSEMBL, PValue) %>%
+        arrange(PValue) %>%
+        deframe(), minSize = 10, maxSize = 500) %>%
+  arrange(-padj)
+```
+
+
+
 
 
 ## Volcano Plots

@@ -1,0 +1,25 @@
+ANALYSIS 1 - RNAseq DGE all possible combinations by "Race" and "Tissue type":
+
+EXAMPLE:
+Race: Black, Tissue type: Malignant -VS- Race: Black, Tissue type: Non-Malignant
+Race: Black, Tissue type: Malignant -VS- Race: White, Tissue type: Non-Malignant
+...
+
+
+Output:
+1) Gene lists: p-val= 0.05, p-val= 0.01, p-val= 0.001, FDR: 10%
+2) MA PLOTS - colored significant p-value
+3) Volcano PLOTS - colored significant p-value
+4) Pathways analysis using gene lists.
+
+
+-
+
+ANALYSIS 2 - Gene fusion analysis all possible combinations by "Race" and "Tissue type":
+
+Output:
+1) Interactive HTML file with a list of significant gene fusions.
+
+
+
+
