@@ -237,121 +237,112 @@ if(!file.exists("gene_lists/genes_p05.xlsx") & !file.exists("gene_lists/genes_p0
 
 GO and KEGG are the most frequently used for functional analysis. They are typically the first choice because of their long-standing curation and availability for a wide range of species.
 
-In conclusion, analysing up- and downregulated genes separately is more powerful than analysing all of the DE genes together.
+* Typically, GSEA is run on all genes, not only over/under expressed genes. This information will be taken care of by providing GSEA a **ranked** list of genes.
 
-**IT IS BETTER TO RUN GSEA ON ALL GENES, NOT ONLY OVER/UNDER EXPRESSED**
-**GSEA RANKS GENES BASED ON CERTAIN VALUE YOU PROVIDE**
-Then, this is VERY important, the result it is not that a specific pathway is up- or down-regulated, but the fact that the pathway is affected in some way by the condition that you re studying.
+* VERY important that the result is not that a specific pathway that is up- or down-regulated, but the fact that the pathway is affected in some way by the condition that you are studying.
 https://www.biostars.org/p/449956/
 
-The GSEA algorithm does not filter the expression dataset and generally does not benefit from your filtering of the expression dataset. During the analysis, genes that are poorly expressed or that have low variance across the dataset populate the middle of the ranked gene list and the use of a weighted statistic ensures that they do not contribute to a positive enrichment score. By removing such genes from your dataset, you may actually reduce the power of the statistic.
-
-First I will perform gene set enrichment analysis on GO terms.
-
-```{r}
-### DELETE, DO NOT FILTER GENE LISTS
-
-## prepare gene lists to input to gsea
-## clusterProfiler requires a named list of logFC for input
-
-## p-value 0.05
-geneList.p05 <- lapply(names(genes.p05), function(x){
-  d <- genes.p05[[x]] %>%
-    arrange(desc(logFC)) %>%
-    select(logFC)
-  geneList <- d[,1]
-  names(geneList) <- rownames(d)
-  return(geneList)
-})
-names(geneList.p05) <- names(genes.p05)
+* The GSEA algorithm does not filter the expression dataset and generally does not benefit from your filtering of the expression dataset. During the analysis, genes that are poorly expressed or that have low variance across the dataset populate the middle of the ranked gene list and the use of a weighted statistic ensures that they do not contribute to a positive enrichment score. By removing such genes from your dataset, you may actually reduce the power of the statistic.
 
 
-## p-value 0.01
-geneList.p01 <- lapply(names(genes.p01), function(x){
-  d <- genes.p01[[x]] %>%
-    arrange(desc(logFC)) %>%
-    select(logFC)
-  geneList <- d[,1]
-  names(geneList) <- rownames(d)
-  return(geneList)
-})
-names(geneList.p01) <- names(genes.p01)
-
-
-## p-value 0.001
-geneList.p001 <- lapply(names(genes.p001), function(x){
-  d <- genes.p001[[x]] %>%
-    arrange(desc(logFC)) %>%
-    select(logFC)
-  geneList <- d[,1]
-  names(geneList) <- rownames(d)
-  return(geneList)
-})
-names(geneList.p001) <- names(genes.p001)
-
-
-
-## false discovery rate 10%
-geneList.fdr1 <- lapply(names(genes.fdr1), function(x){
-  d <- genes.fdr1[[x]] %>%
-    arrange(desc(logFC)) %>%
-    select(logFC)
-  geneList <- d[,1]
-  names(geneList) <- rownames(d)
-  return(geneList)
-})
-names(geneList.fdr1) <- names(genes.fdr1)
-```
-
-### Perform GO enrichmennt analysis
-
+### First I will perform gene set enrichment analysis on GO terms.
 
 ```{r}
-## functions to run gseGO with different params
-rungseGOstd <- function(geneList){
-  return(gseGO(geneList, ont = "ALL", keyType = "ENSEMBL", OrgDb = org.Hs.eg.db, nPermSimple = 10000, eps = 1e-300, scoreType = "std"))
+## first step of GSEA is to rank your entire list of genes
+## this can be done by multiplying the logFC by -10log(pval)
+
+all.tables <- lapply(all.res, function(x) topTags(x, n = nrow(x), adjust.method = "BH"))
+
+makeGeneLists <- function(x) {
+  x %>%
+    as.data.frame() %>% mutate(stat = logFC * -log10(PValue)) %>% 
+    rownames_to_column(var = "ENSEMBL") %>% 
+    mutate(ENSEMBL = str_replace(ENSEMBL, ".[0-9]{1,2}$", "")) %>% 
+    dplyr::select(ENSEMBL, stat) %>%
+    arrange(-stat) %>%
+    tibble::deframe()
 }
 
-rungseGOup <- function(geneList){
-  return(gseGO(geneList, ont = "ALL", keyType = "ENSEMBL", OrgDb = org.Hs.eg.db, nPermSimple = 10000, eps = 0, scoreType = "pos"))
-}
 
-rungseGOdn <- function(geneList){
-  return(gseGO(geneList, ont = "ALL", keyType = "ENSEMBL", OrgDb = org.Hs.eg.db, nPermSimple = 10000, eps = 0, scoreType = "neg"))
-}
-```
-
-```{r}
-## calculate logFC * pvalue for ranking statistic
-gsea.input <- lapply(all.res, function(x) topTags(x, n = nrow(x)) %>% as.data.frame %>% mutate(stat = logFC*PValue) %>% arrange(-stat))
-
-## created named list
-gsea.input$mb_nb %>% rownames_to_column()
+all.geneLists <- lapply(all.tables, makeGeneLists)
 ```
 
 
-## Perform gene set enrichment analyses on only up or only downregulated genes
+```{r gsea, warning=FALSE}
+all.gsea <- lapply(all.geneLists, function(x) gseGO(geneList = x, OrgDb = org.Hs.eg.db, keyType = "ENSEMBL", minGSSize = 100, maxGSSize = 500,  nPermSimple = 10000, pvalueCutoff = 1, verbose = F, eps = 1e-300))
+```
 
-```{r, eval=FALSE, include = FALSE}
+```{r fig.height=8, message=FALSE}
+#lapply(all.gsea, function(x) as.data.frame(x))
+lapply(names(all.gsea), function(x) dotplot(all.gsea[[x]], showCategory=20, title = paste(x %>%
+                    str_replace_all("n", "Non-Malignant ") %>%
+                    str_replace_all("m", "Malignant ") %>%
+                    str_replace_all("b", "African") %>%
+                    str_replace_all("w", "Caucasian") %>%
+                    str_replace_all("_", " -VS- "), "GSEA Results")) + scale_y_discrete(labels = function(x) stringr::str_wrap(x, width = 30)))
+```
 
+
+```{r write gsea results to excel file}
+gsea.excel <- lapply(all.gsea, function(x) x@result)
+
+if(!file.exists("pathways/gsea/gseaGO.xlsx")) {write.xlsx(gsea.excel, file = "./pathways/gsea/gseaGO.xlsx")}
+```
+
+
+
+
+
+
+## Pathway enrichment analysis (overrepresentation analysis)
+
+Pathway enrichment analysis is done on differentially expressed genes, typically filtered by p-value and logFC. It tests the probability of your genes matching a gene set, against the probability of matching the gene set at random.
+
+
+
+```{r}
+## function to run enrichGO
+runenrichGO <- function(x){
+  enrichGO(gene = AnnotationDbi::select(org.Hs.eg.db, keys = rownames(x), columns='ENTREZID', keytype='ENSEMBL') %>% pull(ENTREZID), ont = "ALL", OrgDb = org.Hs.eg.db, readable = TRUE)
+}
+```
+
+
+#### Perform gene set enrichment analyses on only up or only downregulated genes
+
+```{r}
 ## separate list of up and down regulated genes
-geneList.p05up <- lapply(geneList.p05, function(x) x[x > 0])
-geneList.p05dn <- lapply(geneList.p05, function(x) x[x < 0])
-geneList.p01up <- lapply(geneList.p01, function(x) x[x > 0])
-geneList.p01dn <- lapply(geneList.p01, function(x) x[x > 0])
-geneList.p001up <- lapply(geneList.p001, function(x) x[x > 0])
-geneList.p001dn <- lapply(geneList.p001, function(x) x[x < 0])
-geneList.fdr1up <- lapply(geneList.fdr1, function(x) x[x > 0])
-geneList.fdr1dn <- lapply(geneList.fdr1, function(x) x[x < 0])
+genes.p05up <- lapply(genes.p05, function(x) filter(x, logFC > 0))
+genes.p05dn <- lapply(genes.p05, function(x) filter(x, logFC < 0))
+genes.p01up <- lapply(genes.p01, function(x) filter(x, logFC > 0))
+genes.p01dn <- lapply(genes.p01, function(x) filter(x, logFC < 0))
+genes.p001up <- lapply(genes.p001, function(x) filter(x, logFC > 0))
+genes.p001dn <- lapply(genes.p001, function(x) filter(x, logFC < 0))
+genes.fdr1up <- lapply(genes.fdr1, function(x) filter(x, logFC > 0))
+genes.fdr1dn <- lapply(genes.fdr1, function(x) filter(x, logFC < 0))
 
 
-ego.p05up <- lapply(geneList.p05up, rungseGOup)
-ego.p05dn <- lapply(geneList.p05dn, rungseGOdn)
+## run enrichment analysis on all
+ego.p05up <- lapply(genes.p05up, runenrichGO)
+ego.p05dn <- lapply(genes.p05dn, runenrichGO)
+ego.p01up <- lapply(genes.p01up, runenrichGO)
+ego.p01dn <- lapply(genes.p01dn, runenrichGO)
+ego.p001up <- lapply(genes.p001up, runenrichGO)
+ego.p001dn <- lapply(genes.p001dn, runenrichGO)
+ego.fdr1up <- lapply(genes.fdr1up, runenrichGO)
+ego.fdr1dn <- lapply(genes.fdr1dn, runenrichGO)
+```
 
-ego.p05up.std <- lapply(geneList.p01up, rungseGOstd)
 
-lapply(ego.p05up, function(x) x@result) # returns 0 significantly enriched pathways
-lapply(ego.p05dn, function(x) x@result) # returns only 1 significantly enriched pathways
+```{r, eval=FALSE}
+write.xlsx(ego.p05up, file = "./pathways/enrichGO/ego.p05up.xlsx")
+write.xlsx(ego.p05dn, file = "./pathways/enrichGO/ego.p05dn.xlsx")
+write.xlsx(ego.p01up, file = "./pathways/enrichGO/ego.p01up.xlsx")
+write.xlsx(ego.p01dn, file = "./pathways/enrichGO/ego.p01dn.xlsx")
+write.xlsx(ego.p001up, file = "./pathways/enrichGO/ego.p001up.xlsx")
+write.xlsx(ego.p001dn, file = "./pathways/enrichGO/ego.p001dn.xlsx")
+write.xlsx(ego.fdr1up, file = "./pathways/enrichGO/ego.fdr1up.xlsx")
+write.xlsx(ego.fdr1dn, file = "./pathways/enrichGO/ego.fdr1dn.xlsx")
 ```
 
 
@@ -460,10 +451,10 @@ Save MA plots
 
 ---
 
+## DESeq2
 
 
-
-```{r Run DESeq2, message=FALSE, eval=FALSE, include=FALSE}
+```{r Run DESeq2, message=FALSE, eval=FALSE}
 run_DESeq <- function(set) {
   x <- set$x
   dds <- DESeqDataSetFromMatrix(countData = counts(set), colData = pData(set), design = ~W_1 + x)
