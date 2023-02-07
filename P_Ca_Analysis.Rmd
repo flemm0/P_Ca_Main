@@ -334,16 +334,18 @@ ego.fdr1dn <- lapply(genes.fdr1dn, runenrichGO)
 ```
 
 
+
 ```{r, eval=FALSE}
-write.xlsx(ego.p05up, file = "./pathways/enrichGO/ego.p05up.xlsx")
-write.xlsx(ego.p05dn, file = "./pathways/enrichGO/ego.p05dn.xlsx")
-write.xlsx(ego.p01up, file = "./pathways/enrichGO/ego.p01up.xlsx")
-write.xlsx(ego.p01dn, file = "./pathways/enrichGO/ego.p01dn.xlsx")
-write.xlsx(ego.p001up, file = "./pathways/enrichGO/ego.p001up.xlsx")
-write.xlsx(ego.p001dn, file = "./pathways/enrichGO/ego.p001dn.xlsx")
-write.xlsx(ego.fdr1up, file = "./pathways/enrichGO/ego.fdr1up.xlsx")
-write.xlsx(ego.fdr1dn, file = "./pathways/enrichGO/ego.fdr1dn.xlsx")
+lapply(names(ego.p05up), function(x) write.xlsx(ego.p05up, file =  paste0("./pathways/ego_p05up/", x, ".xlsx")))   
+lapply(names(ego.p05dn), function(x) write.xlsx(ego.p05dn, file =  paste0("./pathways/ego_p05dn/", x, ".xlsx")))   
+lapply(names(ego.p01up), function(x) write.xlsx(ego.p01up, file =  paste0("./pathways/ego_p01up/", x, ".xlsx")))   
+lapply(names(ego.p01dn), function(x) write.xlsx(ego.p01dn, file =  paste0("./pathways/ego_p01dn/", x, ".xlsx")))   
+lapply(names(ego.p001up), function(x) write.xlsx(ego.p001up, file = paste0("./pathways/ego_p001up/", x, ".xlsx")))      
+lapply(names(ego.p001dn), function(x) write.xlsx(ego.p001dn, file = paste0("./pathways/ego_p001dn/", x, ".xlsx")))      
+lapply(names(ego.fdr1up), function(x) write.xlsx(ego.fdr1up, file = paste0("./pathways/ego_fdr1up/", x, ".xlsx")))      
+lapply(names(ego.fdr1dn), function(x) write.xlsx(ego.fdr1dn, file = paste0("./pathways/ego_fdr1dn/", x, ".xlsx")))      
 ```
+
 
 
 ## trying `fgsea`
