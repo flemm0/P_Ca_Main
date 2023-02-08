@@ -15,7 +15,7 @@ library(readxl)
 library(openxlsx)
 library(magrittr)
 library(purrr)
-library(tidyverse)
+library(dplyr)
 library(tibble)
 library(stringr)
 library(RUVSeq)
@@ -305,6 +305,16 @@ Pathway enrichment analysis is done on differentially expressed genes, typically
 runenrichGO <- function(x){
   enrichGO(gene = AnnotationDbi::select(org.Hs.eg.db, keys = rownames(x), columns='ENTREZID', keytype='ENSEMBL') %>% pull(ENTREZID), ont = "ALL", OrgDb = org.Hs.eg.db, readable = TRUE)
 }
+
+
+## prepare dataframe for MSigDb search
+hmk <- msigdbr::msigdbr(species = "Homo sapiens", category = "H") %>% dplyr::select(gs_name, entrez_gene)
+C6 <- msigdbr::msigdbr(species = "Homo sapiens", category = "C6") %>% dplyr::select(gs_name, entrez_gene)
+m_df <- rbind(hmk, C6) ## I will search against Hallmark Gene Set and Oncogene Set
+
+runMsigdbEnricher <- function(x){
+  enricher(AnnotationDbi::select(org.Hs.eg.db, keys = rownames(x), columns='ENTREZID', keytype='ENSEMBL') %>% pull(ENTREZID), TERM2GENE = m_df)
+}
 ```
 
 
@@ -323,16 +333,63 @@ genes.fdr1dn <- lapply(genes.fdr1, function(x) filter(x, logFC < 0))
 
 
 ## run enrichment analysis on all
-ego.p05up <- lapply(genes.p05up, runenrichGO)
-ego.p05dn <- lapply(genes.p05dn, runenrichGO)
-ego.p01up <- lapply(genes.p01up, runenrichGO)
-ego.p01dn <- lapply(genes.p01dn, runenrichGO)
-ego.p001up <- lapply(genes.p001up, runenrichGO)
-ego.p001dn <- lapply(genes.p001dn, runenrichGO)
-ego.fdr1up <- lapply(genes.fdr1up, runenrichGO)
-ego.fdr1dn <- lapply(genes.fdr1dn, runenrichGO)
+# ego.p05up <- lapply(genes.p05up, runenrichGO)
+# ego.p05dn <- lapply(genes.p05dn, runenrichGO)
+# ego.p01up <- lapply(genes.p01up, runenrichGO)
+# ego.p01dn <- lapply(genes.p01dn, runenrichGO)
+# ego.p001up <- lapply(genes.p001up, runenrichGO)
+# ego.p001dn <- lapply(genes.p001dn, runenrichGO)
+# ego.fdr1up <- lapply(genes.fdr1up, runenrichGO)
+# ego.fdr1dn <- lapply(genes.fdr1dn, runenrichGO)
 ```
 
+```{r}
+filtered.geneLists <- list("genes.p05up" = genes.p05up, "genes.p05dn" = genes.p05dn, "genes.p01up" = genes.p01up, "genes.p01dn" = genes.p01dn, 
+                           "genes.p001up" = genes.p001up, "genes.p001dn" = genes.p001dn, "genes.fdr1up" = genes.fdr1up, "genes.fdr1dn" = genes.fdr1dn)
+
+
+all.ego.res <- lapply(filtered.geneLists, function(y) lapply(y, runenrichGO))
+all.msigdb.res <- lapply(filtered.geneLists, function(y) lapply(y, runMsigdbEnricher))
+
+lapply(all.msigdb.res, function(y) lapply(y, function(x) x@result))
+```
+
+```{r}
+## create 6 lists to hold pathway enrichment results
+
+## loop through the all.msigdb.res results, this will go through genes.fdr1up, genes.fdr1dn, etc..
+## loop through NAMES of each list of dfs inside all.msigdb.res and append resulting tables to the list matching the name of comparison c(list(df), x)
+
+mb_nb_msigdbpths <- list()
+mw_nb_msigdbpths <- list()
+nb_nw_msigdbpths <- list()
+mb_mw_msigdbpths <- list()
+mb_nw_msigdbpths <- list()
+mw_nw_msigdbpths <- list()
+
+
+for (i in names(all.msigdb.res)){
+  for (j in names(all.msigdb.res[[i]])){
+    if (j == "mb_nb"){
+      mb_nb_msigdbpths[[i]] <- all.msigdb.res[[i]][[j]]
+    } else if (j == "mw_nb"){
+      mw_nb_msigdbpths[[i]] <- all.msigdb.res[[i]][[j]]
+    } else if (j == "nb_nw"){
+      nb_nw_msigdbpths[[i]] <- all.msigdb.res[[i]][[j]]
+    } else if (j == "mb_nb"){
+      mb_nb_msigdbpths[[i]] <- all.msigdb.res[[i]][[j]]
+    } else if (j == "mb_mw"){
+      mb_mw_msigdbpths[[i]] <- all.msigdb.res[[i]][[j]]
+    } else if (j == "mb_nw"){
+      mb_nw_msigdbpths[[i]] <- all.msigdb.res[[i]][[j]]
+    } else if (j == "mw_nw"){
+      mw_nw_msigdbpths[[i]] <- all.msigdb.res[[i]][[j]]
+    }
+  }
+}
+
+mw_nb_msigdbpths
+```
 
 
 ```{r, eval=FALSE}
@@ -468,20 +525,23 @@ run_DESeq <- function(set) {
 all.deseq.res <- lapply(all.sets.norm.nc, run_DESeq)
 
 ## convert to data frame
-all.deseq.res <- lapply(all.deseq.res, as.data.frame)
+#all.deseq.res <- lapply(all.deseq.res, as.data.frame)
 
 ## add gene symbols
-all.deseq.res.sym <- lapply(all.deseq.res, add_gene_sym)
+#all.deseq.res.sym <- lapply(all.deseq.res, add_gene_sym)
 
-lapply(names(all.deseq.res.sym), function(x) EnhancedVolcano(all.deseq.res.sym[[x]], x = "log2FoldChange", y = "padj", lab = all.deseq.res.sym[[x]]$SYMBOL,
-                                                       title = x %>%
-                                                         str_replace_all("n", "Non-Malignant ") %>%
-                                                         str_replace_all("m", "Malignant ") %>%
-                                                         str_replace_all("b", "African") %>%
-                                                         str_replace_all("w", "Caucasian") %>%
-                                                         str_replace_all("_", " -VS- "),
-                                                       subtitle = "p-value cutoff: 0.05 | log2-fold change cutoff: 1", col = c("gray", "red2", "yellow1", "blue3")
-                                                       ))
+#lapply(names(all.deseq.res.sym), function(x) EnhancedVolcano(all.deseq.res.sym[[x]], x = "log2FoldChange", y = "padj", lab = all.deseq.res.sym[[x]]$SYMBOL,
+#                                                       title = x %>%
+#                                                         str_replace_all("n", "Non-Malignant ") %>%
+#                                                         str_replace_all("m", "Malignant ") %>%
+#                                                         str_replace_all("b", "African") %>%
+#                                                         str_replace_all("w", "Caucasian") %>%
+#                                                         str_replace_all("_", " -VS- "),
+#                                                       subtitle = "p-value cutoff: 0.05 | log2-fold change cutoff: 1", col = c("gray", "red2", "yellow1", "blue3")
+#                                                      ))
 ```
 
+```{r}
+lapply(all.deseq.res, function(x) as.data.frame(x) %>% filter(pvalue < 0.05))
+```
 
