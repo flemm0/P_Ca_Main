@@ -16,6 +16,7 @@ library(openxlsx)
 library(magrittr)
 library(purrr)
 library(dplyr)
+library(tidyr)
 library(tibble)
 library(stringr)
 library(RUVSeq)
@@ -53,9 +54,11 @@ Rename columns so they are easier to work with downstream
 
 ```{r change column names}
 new.names <- metadata %>%
-  mutate(KGP_Sample_ID = str_extract(KGP_Sample_ID, "00[:digit:]{2}") %>% str_replace("00[0]?", "RNA")) %>%
-  mutate(`Tissue Type` = ifelse(`Tissue Type` == "Malignant", "M", "N"), Race = ifelse(Race == "Black", "B", "W")) %>%
-  unite(id, c("Tissue Type", "Race", "MGC_Sample_ID")) %>%
+  mutate(KGP_Sample_ID = stringr::str_extract(KGP_Sample_ID, "00[:digit:]{2}") %>% 
+           stringr::str_replace("00[0]?", "RNA")) %>%
+  mutate(`Tissue Type` = ifelse(`Tissue Type` == "Malignant", "M", "N"), 
+                Race = ifelse(Race == "Black", "B", "W")) %>%
+  tidyr::unite(id, c("Tissue Type", "Race", "MGC_Sample_ID")) %>%
   arrange(as.integer(str_extract(KGP_Sample_ID, "[:digit:]{1,2}"))) %>%
   dplyr::select(id) %>%
   as.list()
@@ -235,7 +238,7 @@ Write results to excel workbook
 ```{r}
 all.filtered.gene.lists <- list("p0.05" = genes.p05, "p0.01" = genes.p01, "p0.001" = genes.p001, "fdr0.1" = genes.fdr1)
 
-
+## function to write gene lists to excel
 write_results <- function(list_of_datasets){
   mb_nb.res <- list()
   mw_nb.res <- list()
@@ -267,7 +270,9 @@ write_results <- function(list_of_datasets){
   return(list("mb_nb" = mb_nb.res, "mw_nb" = mw_nb.res, "nb_nw" = nb_nw.res, 
          "mb_mw" = mb_mw.res, "mb_nw" = mb_nw.res, "mw_nw" = mw_nw.res))
 }
+```
 
+```{r eval=FALSE}
 to_write <- write_results(all.filtered.gene.lists)
 
 invisible(lapply(names(to_write), function(name) {
@@ -333,10 +338,10 @@ lapply(names(all.gsea), function(x) dotplot(all.gsea[[x]], showCategory=20, titl
                     str_replace_all("_", " -VS- "), "GSEA Results")) + scale_y_discrete(labels = function(x) stringr::str_wrap(x, width = 30)))
 ```
 
-```{r write gsea results to excel file}
+```{r write gsea results to excel file, eval=FALSE}
 # write separate files for each comparison
-invisible(lapply(names(gsea.excel), function(x){ 
-  write.xlsx(gsea.excel[[x]], 
+invisible(lapply(names(all.gsea), function(x){ 
+  write.xlsx(all.gsea[[x]], 
              file = paste0("./gene_set_enrichment_analysis_results/", x, ".xlsx"))
   }
 ))
@@ -396,7 +401,7 @@ all.ego.res <- lapply(filtered.geneLists, function(y) lapply(y, runenrichGO))
 all.msigdb.res <- lapply(filtered.geneLists, function(y) lapply(y, runMsigdbEnricher))
 ```
 
-```{r}
+```{r, eval=FALSE}
 ## split results into their respective comparisons (ex: Malignant African vs Nonmalignant African)
 msigdb_to_write <- write_results(all.msigdb.res)
 ego_to_write <- write_results(all.ego.res)
@@ -422,6 +427,18 @@ invisible(lapply(names(msigdb_to_write), function(name) {
 
 
 ## Volcano Plots
+
+
+```{r}
+makeTables <- function(dgelrt){
+  topTags(dgelrt, sort.by = "p.value", n = nrow(dgelrt), adjust.method = "BH") %>%
+  as.data.frame()
+}
+
+
+all.tables.sym <- lapply(all.res, makeTables)
+all.tables.sym <- lapply(all.tables.sym, addGeneSym)
+```
 
 
 ```{r fig.height=6, fig.width=8}
