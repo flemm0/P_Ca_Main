@@ -235,6 +235,49 @@ genes.fdr1 <- lapply(genes.fdr1, addGeneSym)
 ---
 
 
+Venn Diagrams
+
+```{r fig.width=12}
+venn.lists <- list("fdr10" = genes.fdr1, "p0.001" = genes.p001, "p0.01" = genes.p01, "p0.05" = genes.p05)
+
+venn.lists <- lapply(venn.lists, function(x) {
+  lapply(names(x), function(y) {
+    x[[y]] %>%
+      mutate(grp = rep(y)) %>%
+      mutate(grp = ifelse(logFC < 0, str_extract(grp, "^[a-z]{2}"), str_extract(grp, "[a-z]{2}$")))
+  })
+})
+
+venn.lists <- lapply(venn.lists, bind_rows, .id = "column_labels")
+
+venns <- lapply(names(venn.lists), function(x){
+  to_plot <- list(
+    "Malignant Black" = venn.lists[[x]] %>% filter(grp == "mb") %>% pull(SYMBOL),
+    "Nonmalignant Black" = venn.lists[[x]] %>% filter(grp == "nb") %>% pull(SYMBOL),
+    "Malignant White" = venn.lists[[x]] %>% filter(grp == "mw") %>% pull(SYMBOL),
+    "Nonmalignant White" = venn.lists[[x]] %>% filter(grp == "nw") %>% pull(SYMBOL)
+  )
+  ggVennDiagram(to_plot, label_alpha = 0, show_intersect = F, set_size = 7) + 
+  scale_x_continuous(expand = expansion(mult = .2)) + 
+  scale_fill_distiller(palette = "Reds", direction = 1) +
+  labs(title = ifelse(x == "fdr10", "False Discovery Rate 10%",
+                      ifelse(x == "p0.001", "p-value 0.001",
+                             ifelse(x == "p0.01", "p-value 0.01", "p-value 0.05"))))
+})
+
+names(venns) <- names(venn.lists)
+venns
+```
+
+```{r, eval=FALSE,include=FALSE}
+# lapply(names(venns), function(x) ggsave(filename=paste0("./venndiagrams/", x,".jpeg"),
+#                                          plot=venns[[x]], dpi = 800, width = 10,
+#                                         height = 7, units = "in"))
+```
+
+
+---
+
 ## Volcano Plots
 
 
@@ -369,7 +412,9 @@ all.geneLists <- lapply(all.tables, makeGeneLists)
 all.gsea <- lapply(all.geneLists, function(x) gseGO(geneList = x, OrgDb = org.Hs.eg.db, keyType = "ENSEMBL", minGSSize = 100, maxGSSize = 500,  nPermSimple = 10000, pvalueCutoff = 1, verbose = F, eps = 1e-300))
 ```
 
-Dotplot of enriched pathways
+
+
+Dotplot of enriched pathways from Gene Ontology
 
 ```{r fig.height=8, message=FALSE}
 #lapply(all.gsea, function(x) as.data.frame(x))
@@ -563,6 +608,16 @@ invisible(lapply(names(msigdb_to_write), function(name) {
 ```{r}
 cnetplot(all.ego.res$genes.p05up$mb_nb)
 ```
+
+---
+
+KEGG
+
+```{r}
+##AnnotationDbi::select(org.Hs.eg.db, keys = names(all.geneLists$mb_nb), columns='ENTREZID', keytype='ENSEMBL') %>% pull(ENTREZID)
+##enrichKEGG(gene = )
+```
+
 
 
 
