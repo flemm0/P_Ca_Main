@@ -30,6 +30,7 @@ library(org.Hs.eg.db)
 library(ggpubr)
 library(msigdbr)
 library(enrichplot)
+library(pathview)
 ```
 
 ### Read in and process data
@@ -462,9 +463,6 @@ heatplot(setReadable(all.gsea$mb_nb, 'org.Hs.eg.db', 'ENSEMBL'), all.gsea$mb_nb,
 lapply(all.gsea, upsetplot)
 ```
 
-
-
-
 ```{r write gsea results to excel file, eval=FALSE}
 # write separate files for each comparison
 invisible(lapply(names(all.gsea), function(x){ 
@@ -475,6 +473,60 @@ invisible(lapply(names(all.gsea), function(x){
 ```
 
 
+---
+
+KEGG
+
+```{r}
+#length(all.geneLists$mb_nb) ### 22,727 genes to beginn with
+#length(unique(names(all.geneLists$mb_nb)))
+
+#colSums(is.na(AnnotationDbi::select(org.Hs.eg.db, keys = names(all.geneLists$mb_nb), columns='ENTREZID', keytype='ENSEMBL'))) ### 4341 NA values 
+
+
+#colSums(is.na(AnnotationDbi::select(EnsDb.Hsapiens.v86, keys = names(all.geneLists$mb_nb), columns='ENTREZID', keytype='GENEID'))) ### 5666 
+```
+
+```{r}
+all.kegg <- lapply(all.geneLists, function(x){
+  mapping <- AnnotationDbi::select(EnsDb.Hsapiens.v86, keys = names(all.geneLists$mb_nb), columns='ENTREZID', keytype='GENEID') # map ensembl to entrez
+  
+  orig.genelist <- as.data.frame(x) %>% rownames_to_column('ENSEMBLID') %>% rename(score = x)
+  
+  mapping <- merge(x = mapping, y = orig.genelist, by.x = 'GENEID', by.y = 'ENSEMBLID') %>%
+    arrange(-score) %>%
+    na.omit() %>%
+    select(ENTREZID, score)
+  
+  to.enrich <- mapping$score
+  names(to.enrich) <- mapping$ENTREZID
+  
+  return(gseKEGG(geneList   = to.enrich,
+               organism     = 'hsa',
+               minGSSize    = 120,
+               pvalueCutoff = 0.05,
+               verbose      = FALSE))
+})
+```
+
+```{r}
+lapply(all.kegg, head)
+```
+
+
+```{r save some KEGG pathway results}
+hsa00190 <- pathview(gene.data  = to.enrich,
+                     pathway.id = "hsa00190",
+                     species    = "hsa",
+                     limit      = list(gene=max(abs(to.enrich)), cpd=1))
+
+hsa05208 <- pathview(gene.data = to.enrich, pathway.id = "hsa05208", organism = "hsa", 
+                     limit = list(gene=max(abs(to.enrich)), cpd=1))
+
+```
+
+
+---
 
 ## Pathway enrichment analysis (over representation analysis)
 
@@ -600,23 +652,31 @@ invisible(lapply(names(msigdb_to_write), function(name) {
 ))
 ```
 
+```{r eval=FALSE,include=FALSE}
+filtered.geneLists$genes.p05up$mb_nb
+### KEGG ORA
+mkk <- enrichMKEGG(gene = bitr(rownames(filtered.geneLists$genes.p05up$mb_nb), fromType = "GENEID",
+                               toType = "ENTREZID", OrgDb = EnsDb.Hsapiens.v86) %>% pull(ENTREZID),
+                   keyType = 'ncbi-geneid',
+                   organism = 'hsa',
+                   pvalueCutoff = 1,
+                   qvalueCutoff = 1)
+
+head(mkk)
+
+
+```
 
 ---
 
 ### Molecular Pathways Plots
 
 ```{r}
-cnetplot(all.ego.res$genes.p05up$mb_nb)
+#cnetplot(all.ego.res$genes.p05up$mb_nb)
 ```
 
 ---
 
-KEGG
-
-```{r}
-##AnnotationDbi::select(org.Hs.eg.db, keys = names(all.geneLists$mb_nb), columns='ENTREZID', keytype='ENSEMBL') %>% pull(ENTREZID)
-##enrichKEGG(gene = )
-```
 
 
 
