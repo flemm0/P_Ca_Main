@@ -1,0 +1,4 @@
+"0","test.file <- read.table("
+"0","  file=""./Count_Table/ENRIQUERNA_0001_01_PROSTATE_SRR10238298_C1_NEBKAP_A00001.proj.Aligned.out.sorted.md.bam.htSeqCounts"""
+"0",")"
+"0","head(test.file)"

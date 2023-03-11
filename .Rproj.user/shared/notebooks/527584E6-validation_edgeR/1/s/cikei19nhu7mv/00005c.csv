@@ -1,0 +1,3 @@
+"0","colors <- brewer.pal(3, ""Set1"")"
+"0","par(mfrow=c(1,2))"
+"0","plotRLE(set, outline = FALSE, ylim = c(-4,4), col = colors[x])"

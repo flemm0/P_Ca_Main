@@ -1,0 +1,719 @@
+---
+title: 'Prostate Cancer RNASeq Analysis Between African Americans and Causasian Americans:'
+author: "Flemming Wu"
+---
+
+```{r include=FALSE}
+if (Sys.info()["sysname"] == "Darwin") {setwd("~/Desktop/velvilab/P_Ca_Analysis")}
+if (Sys.info()["sysname"] == "Windows") {setwd("C:/Users/flemm/velvilab/P_Ca_Analysis_012723")}
+```
+
+### Load libraries
+
+```{r load libs, message=FALSE}
+library(readxl)
+library(openxlsx)
+library(magrittr)
+library(purrr)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(stringr)
+library(RUVSeq)
+library(ggplot2)
+library(RColorBrewer)
+library(DESeq2)
+library(EnsDb.Hsapiens.v86)
+library(EnhancedVolcano)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(ggpubr)
+library(msigdbr)
+library(enrichplot)
+library(pathview)
+```
+
+### Read in and process data
+
+```{r message=FALSE}
+metadata <- read_xlsx("./data/RNAseq_Samples_012723.xlsx")
+data <- read_xlsx("./data/Data_012723.xlsx")
+```
+
+```{r, eval=FALSE}
+dim(data) #58780 genes in 20 samples
+```
+
+Set gene id to row names and remove redundant columns
+
+```{r change rownames}
+#head(data) ## gene id columns are redundant, make them the rownames and remove columns
+data <- column_to_rownames(data, var = "Geneid...1")
+data <- dplyr::select(data, -starts_with("Geneid"))
+```
+
+Rename columns so they are easier to work with downstream
+
+```{r change column names}
+new.names <- metadata %>%
+  mutate(KGP_Sample_ID = stringr::str_extract(KGP_Sample_ID, "00[:digit:]{2}") %>% 
+           stringr::str_replace("00[0]?", "RNA")) %>%
+  mutate(`Tissue Type` = ifelse(`Tissue Type` == "Malignant", "M", "N"), 
+                Race = ifelse(Race == "Black", "B", "W")) %>%
+  tidyr::unite(id, c("Tissue Type", "Race", "MGC_Sample_ID")) %>%
+  arrange(as.integer(str_extract(KGP_Sample_ID, "[:digit:]{1,2}"))) %>%
+  dplyr::select(id) %>%
+  as.list()
+
+names(data) <- new.names$id
+```
+
+### Split data by comparisons
+
+*reference level (control) in design matrix is the first level of the factor variable, which is the level with the lowest number or letter among the values provided*
+
+Since the reference group in the design matrix is assigned by the level with the lowest number or letter among the values provided, I named the groups to match accordingly.
+
+For example: mb_nb = Nonmalignant black (reference) vs nonmalignant black (comparison), since m comes before n alphabetically
+
+```{r split by comparisons}
+#head(table(rowMeans(data)), 20)
+#head(table(rowSums(data)), 20) # 18,082 genes have 0 expression across all samples
+
+## split data for all comparisons
+
+# Nonnmalignant black vs malignant black
+mb_nb <- data %>% select_if(grepl("M_B", names(.)) | grepl("N_B", names(.)))
+# Walignant white vs nonmalignant black
+mw_nb <- data %>% select_if(grepl("M_W", names(.)) | grepl("N_B", names(.)))
+# Nonmalignant black vs nonmalignant white
+nb_nw <- data %>% select_if(grepl("N_B", names(.)) | grepl("N_W", names(.)))
+# Malignant black vs malignant white
+mb_mw <- data %>% select_if(grepl("M_B", names(.)) | grepl("M_W", names(.)))
+# Malignant black vs nonmalignant white
+mb_nw <- data %>% select_if(grepl("M_B", names(.)) | grepl("N_W", names(.)))
+# Malignant white vs nonmalignant white
+mw_nw <- data %>% select_if(grepl("M_W", names(.)) | grepl("N_W", names(.)))
+
+## combine into list of datasets
+all.dfs <- list("mb_nb" = mb_nb, "mw_nb" = mw_nb, "nb_nw" = nb_nw, "mb_mw" = mb_mw, "mb_nw" = mb_nw, "mw_nw" = mw_nw)
+```
+
+### Remove unwanted variation with `RUVg`
+
+First, filter out rows that don't meet the requirements of: more than 5 reads in at least 3 samples from each comparison
+
+```{r}
+all.dfs.filt <- lapply(all.dfs, function(df) df[apply(df, 1, function(x) length(x[x>5])>=3), ])
+```
+
+Create SeqExpressionSet objects from data frames
+
+```{r}
+make_sets <- function(df) {
+  x <- names(df) %>% str_extract("[MN]_[WB]") %>% as.factor()
+  set <- newSeqExpressionSet(as.matrix(df), phenoData = data.frame(x, row.names = colnames(df)))
+  return(set)
+}
+
+all.sets <- lapply(all.dfs.filt, function(x) make_sets(x))
+```
+
+#### EDA
+
+View PCA and RLE plots of the samples prior to normalization
+
+```{r initial plots, fig.width=3, fig.height=2}
+plot_sets <- function(set) {
+  x <- set$x
+  colors <- brewer.pal(3, "Set1")
+  plotRLE(set, outline = FALSE, ylim = c(-4,4), col = colors[x])
+  plotPCA(set, col = colors[x], cex = 0.7)
+}
+
+#lapply(all.sets, function(set) plot_sets(set)) ## check plots
+```
+
+#### Run between lane (upper quartile) normalization.
+
+```{r between lane normalization, fig.width=3, fig.height=2}
+all.sets.norm <- lapply(all.sets, function(set) betweenLaneNormalization(set, which = "upper"))
+
+#lapply(all.sets.norm, function(set) plot_sets(set)) ## check new plots
+```
+
+
+### Create empirical negative control genes and Run DE analysis with `edgeR`
+
+#### Since no genes are known a priori to be influenced by covariates of interest, I will use least significantly DE genes as "in-silico empirical" negative controls.
+
+```{r}
+## write function to update SeqExpressionSet objects to have negative controls
+est_neg_ctrl <- function(set) {
+  x <- set$x
+  design <- model.matrix(~x, data = pData(set))
+  y <- DGEList(counts = counts(set), group = x)
+  y <- calcNormFactors(y, method = "upperquartile")
+  y <- estimateGLMCommonDisp(y, design)
+  y <- estimateGLMTagwiseDisp(y, design)
+
+  fit <- glmFit(y, design)
+  lrt <- glmLRT(fit, coef = 2)
+
+  top <- topTags(lrt, n = nrow(set))$table
+  empirical <- rownames(set)[which(!(rownames(set) %in% rownames(top)[1:5000]))]
+  
+  # run RUVg
+  newset <- RUVg(set, empirical, k = 1)
+  return(newset)
+}
+
+## Function to rerun edgeR with newly obtained negative controls
+run_glmLRT <- function(newset) {
+  x <- newset$x
+  design <- model.matrix(~x + W_1, data = pData(newset))
+  y <- DGEList(counts = counts(newset), group = x)
+  y <- calcNormFactors(y, method = "upperquartile")
+  y <- estimateGLMCommonDisp(y, design)
+  y <- estimateGLMTagwiseDisp(y, design)
+
+  fit <- glmFit(y, design)
+  lrt <- glmLRT(fit, coef=2)
+  return(lrt)
+}
+
+
+################
+
+
+
+all.sets.norm.nc <- lapply(all.sets.norm, est_neg_ctrl)
+all.res <- lapply(all.sets.norm.nc, run_glmLRT) ## all.res stores final edgeR results
+```
+
+
+Filter gene lists based on: p-val= 0.05, p-val= 0.01, p-val= 0.001, FDR: 10%
+
+```{r}
+filterResults <- function(dgelrt, filt, thresh){
+  topTags(dgelrt, sort.by = "p.value", n = nrow(dgelrt), adjust.method = "BH") %>%
+  as.data.frame() %>%
+  filter(if (filt == "pval") PValue < thresh else FDR < thresh)
+}
+
+genes.p05 <- lapply(all.res, filterResults, "pval", 0.05)
+genes.p01 <- lapply(all.res, filterResults, "pval", 0.01)
+genes.p001 <- lapply(all.res, filterResults, "pval", 0.001)
+genes.fdr1 <- lapply(all.res, filterResults, "logfc", 0.1)
+```
+
+Add gene symbol to results
+
+```{r}
+addGeneSym <- function(df) {
+  # remove "." from ensembl gene id
+  rownames(df) <- sub("\\.[0-9]*$", "", rownames(df))
+  # map ensembl geneid to gene symbol
+  geneids <- ensembldb::select(x = EnsDb.Hsapiens.v86,  key=rownames(df), columns=c("SYMBOL"), keytype="GENEID")
+  rownames(geneids) <- geneids$GENEID
+  
+  # merge mapping back to original dataframe
+  df <- merge(x = df, y = geneids, by = "row.names", all = TRUE) %>%
+    column_to_rownames(var = "Row.names") %>%
+    relocate(SYMBOL, .before = logFC) %>%
+    select(!starts_with("GENEID"))
+  
+  return(df)
+}
+
+
+genes.p05 <- lapply(genes.p05, addGeneSym)
+genes.p01 <- lapply(genes.p01, addGeneSym)
+genes.p001 <- lapply(genes.p001, addGeneSym)
+genes.fdr1 <- lapply(genes.fdr1, addGeneSym)
+```
+
+---
+
+
+Venn Diagrams
+
+```{r fig.width=12}
+venn.lists <- list("fdr10" = genes.fdr1, "p0.001" = genes.p001, "p0.01" = genes.p01, "p0.05" = genes.p05)
+
+venn.lists <- lapply(venn.lists, function(x) {
+  lapply(names(x), function(y) {
+    x[[y]] %>%
+      mutate(grp = rep(y)) %>%
+      mutate(grp = ifelse(logFC < 0, str_extract(grp, "^[a-z]{2}"), str_extract(grp, "[a-z]{2}$")))
+  })
+})
+
+venn.lists <- lapply(venn.lists, bind_rows, .id = "column_labels")
+
+venns <- lapply(names(venn.lists), function(x){
+  to_plot <- list(
+    "Malignant Black" = venn.lists[[x]] %>% filter(grp == "mb") %>% pull(SYMBOL),
+    "Nonmalignant Black" = venn.lists[[x]] %>% filter(grp == "nb") %>% pull(SYMBOL),
+    "Malignant White" = venn.lists[[x]] %>% filter(grp == "mw") %>% pull(SYMBOL),
+    "Nonmalignant White" = venn.lists[[x]] %>% filter(grp == "nw") %>% pull(SYMBOL)
+  )
+  ggVennDiagram(to_plot, label_alpha = 0, show_intersect = F, set_size = 7) + 
+  scale_x_continuous(expand = expansion(mult = .2)) + 
+  scale_fill_distiller(palette = "Reds", direction = 1) +
+  labs(title = ifelse(x == "fdr10", "False Discovery Rate 10%",
+                      ifelse(x == "p0.001", "p-value 0.001",
+                             ifelse(x == "p0.01", "p-value 0.01", "p-value 0.05"))))
+})
+
+names(venns) <- names(venn.lists)
+venns
+```
+
+```{r, eval=FALSE,include=FALSE}
+# lapply(names(venns), function(x) ggsave(filename=paste0("./venndiagrams/", x,".jpeg"),
+#                                          plot=venns[[x]], dpi = 800, width = 10,
+#                                         height = 7, units = "in"))
+```
+
+
+---
+
+## Volcano Plots
+
+
+```{r}
+makeTables <- function(dgelrt){
+  topTags(dgelrt, sort.by = "p.value", n = nrow(dgelrt), adjust.method = "BH") %>%
+  as.data.frame()
+}
+
+
+all.tables.sym <- lapply(all.res, makeTables)
+all.tables.sym <- lapply(all.tables.sym, addGeneSym)
+```
+
+
+```{r fig.height=6, fig.width=8}
+DoVolcanoPlot <- function(x){
+  EnhancedVolcano(all.tables.sym[[x]], 
+                  x = "logFC", 
+                  y = "PValue", 
+                  lab = all.tables.sym[[x]]$SYMBOL,
+                  title = x %>%
+                    str_replace_all("n", "Non-Malignant ") %>%
+                    str_replace_all("m", "Malignant ") %>%
+                    str_replace_all("b", "African") %>%
+                    str_replace_all("w", "Caucasian") %>%
+                    str_replace_all("_", " -VS- "),
+                  subtitle = "p-value cutoff: 0.05 | log2-fold change cutoff: 1", 
+                  col = c("gray", "#4bd0fe", "red1", "#fef84b")
+  )
+}
+
+volplots <- lapply(names(all.tables.sym), DoVolcanoPlot)
+names(volplots) <- names(all.tables.sym)
+```
+
+Save volcano plots
+```{r eval=FALSE,include=FALSE}
+#lapply(names(volplots), function(x) ggsave(filename=paste0("./plots/vol_", x,".jpeg"),
+#                                          plot=volplots[[x]], dpi = 800, width = 9, 
+#                                          height = 11, units = "in"))
+```
+
+
+---
+
+## MA Plots
+
+Typically, lower mean expression values will have more variability in log fold-change than the higher expression value. This results in a fanning effect of the data points as the graph moves from right to left.
+
+
+```{r MA Plots, fig.height=6, fig.width=8}
+DoMAPlot <- function(x){
+  data <- all.tables.sym[[x]] %>%
+    rename(log2FoldChange = logFC, baseMeanLog2 = logCPM, padj = PValue)
+  genenames <- all.tables.sym[[x]]$SYMBOL %>% as.vector()
+  ggmaplot(data = data, 
+           main = x %>%
+             str_replace_all("n", "Non-Malignant ") %>%
+             str_replace_all("m", "Malignant ") %>%
+             str_replace_all("b", "African") %>%
+             str_replace_all("w", "Caucasian") %>%
+             str_replace_all("_", " -VS- "),
+           fdr = 0.05, fc = 2, size = 0.4,
+           palette = c("#7AFF96", "#FF7A7A", "darkgray"),
+           genenames = genenames,
+           legend = "top", top = 20,
+           select.top.method = "padj",
+           font.label = c("bold", 9), label.rectangle = FALSE,
+           font.legend = "bold",
+           font.main = "bold",
+           xlab = "Average logCPM",
+           ggtheme = ggplot2::theme_minimal()
+           )
+}
+
+maplots <- lapply(names(all.tables.sym), DoMAPlot)
+names(maplots) <- names(all.tables.sym)
+```
+
+Save MA plots
+```{r, eval=FALSE,include=FALSE}
+#lapply(names(maplots), function(x) ggsave(filename=paste0("./plots/ma_", x,".jpeg"),
+#                                          plot=maplots[[x]], dpi = 800, width = 10, 
+#                                         height = 7, units = "in"))
+```
+
+
+
+
+---
+
+
+
+## Gene Set Enrichment Analysis
+
+GO and KEGG are the most frequently used for functional analysis. They are typically the first choice because of their long-standing curation and availability for a wide range of species.
+
+* Typically, GSEA is run on all genes, not only over/under expressed genes. This information will be taken care of by providing GSEA a **ranked** list of genes.
+
+* Important that the result is not that a specific pathway that is up- or down-regulated, but the fact that the pathway is affected in some way by the condition that you are studying.
+
+  - [https://www.biostars.org/p/449956/](https://www.biostars.org/p/449956/)
+
+* The GSEA algorithm does not filter the expression dataset and generally does not benefit from your filtering of the expression dataset. During the analysis, genes that are poorly expressed or that have low variance across the dataset populate the middle of the ranked gene list and the use of a weighted statistic ensures that they do not contribute to a positive enrichment score. By removing such genes from your dataset, you may actually reduce the power of the statistic.
+
+
+### First I will perform gene set enrichment analysis on GO terms.
+
+```{r}
+## first step of GSEA is to rank your entire list of genes
+## this can be done by multiplying the logFC by -10log(pval) to account for both expression level and significance
+
+all.tables <- lapply(all.res, function(x) topTags(x, n = nrow(x), adjust.method = "BH"))
+
+makeGeneLists <- function(x) {
+  x %>%
+    as.data.frame() %>% mutate(stat = logFC * -log10(PValue)) %>% 
+    rownames_to_column(var = "ENSEMBL") %>% 
+    mutate(ENSEMBL = str_replace(ENSEMBL, ".[0-9]{1,2}$", "")) %>% 
+    dplyr::select(ENSEMBL, stat) %>%
+    arrange(-stat) %>%
+    tibble::deframe()
+}
+
+
+all.geneLists <- lapply(all.tables, makeGeneLists)
+```
+
+
+```{r gsea, warning=FALSE}
+all.gsea <- lapply(all.geneLists, function(x) gseGO(geneList = x, OrgDb = org.Hs.eg.db, keyType = "ENSEMBL", minGSSize = 100, maxGSSize = 500,  nPermSimple = 10000, pvalueCutoff = 1, verbose = F, eps = 1e-300))
+```
+
+
+
+Dotplot of enriched pathways from Gene Ontology
+
+```{r fig.height=8, message=FALSE}
+#lapply(all.gsea, function(x) as.data.frame(x))
+lapply(names(all.gsea), function(x) dotplot(all.gsea[[x]], showCategory=20, title = paste(x %>%
+                    str_replace_all("n", "Non-Malignant ") %>%
+                    str_replace_all("m", "Malignant ") %>%
+                    str_replace_all("b", "African") %>%
+                    str_replace_all("w", "Caucasian") %>%
+                    str_replace_all("_", " -VS- "), "GSEA Results")) + scale_y_discrete(labels = function(x) stringr::str_wrap(x, width = 30)))
+```
+
+##### Network plots of enriched pathways
+
+```{r fig.height=10, fig.width=10, message=FALSE}
+lapply(names(all.gsea), function(x){
+  cnetplot(setReadable(all.gsea[[x]], 'org.Hs.eg.db', 'ENSEMBL'), 
+           foldChange = all.geneLists[[x]]) + 
+    scale_color_gradient2(name="logFC * -log10(pvalue)", low='darkblue', high='firebrick') +
+    ggtitle(label = paste(x %>%
+                    str_replace_all("n", "Non-Malignant ") %>%
+                    str_replace_all("m", "Malignant ") %>%
+                    str_replace_all("b", "African") %>%
+                    str_replace_all("w", "Caucasian") %>%
+                    str_replace_all("_", " -VS- "), "GSEA Results"))
+})
+```
+
+
+###### Heatmaps of enriched pathways
+
+```{r}
+heatplot(setReadable(all.gsea$mb_nb, 'org.Hs.eg.db', 'ENSEMBL'), all.gsea$mb_nb, foldChange=all.geneLists$mb_nb, showCategory=10) + 
+    scale_color_gradient2(name="logFC * -log10(pvalue)", low='darkblue', high='firebrick') +
+    ggtitle(label = paste("mb_nb" %>%
+                    str_replace_all("n", "Non-Malignant ") %>%
+                    str_replace_all("m", "Malignant ") %>%
+                    str_replace_all("b", "African") %>%
+                    str_replace_all("w", "Caucasian") %>%
+                    str_replace_all("_", " -VS- "), "GSEA Results"))
+```
+
+##### Upset plots of enriched pathways
+
+```{r fig.width=8}
+lapply(all.gsea, upsetplot)
+```
+
+```{r write gsea results to excel file, eval=FALSE}
+# write separate files for each comparison
+invisible(lapply(names(all.gsea), function(x){ 
+  write.xlsx(all.gsea[[x]], 
+             file = paste0("./gene_set_enrichment_analysis_results/", x, ".xlsx"))
+  }
+))
+```
+
+
+---
+
+KEGG
+
+```{r}
+#length(all.geneLists$mb_nb) ### 22,727 genes to beginn with
+#length(unique(names(all.geneLists$mb_nb)))
+
+#colSums(is.na(AnnotationDbi::select(org.Hs.eg.db, keys = names(all.geneLists$mb_nb), columns='ENTREZID', keytype='ENSEMBL'))) ### 4341 NA values 
+
+
+#colSums(is.na(AnnotationDbi::select(EnsDb.Hsapiens.v86, keys = names(all.geneLists$mb_nb), columns='ENTREZID', keytype='GENEID'))) ### 5666 
+```
+
+```{r}
+all.kegg <- lapply(all.geneLists, function(x){
+  mapping <- AnnotationDbi::select(EnsDb.Hsapiens.v86, keys = names(all.geneLists$mb_nb), columns='ENTREZID', keytype='GENEID') # map ensembl to entrez
+  
+  orig.genelist <- as.data.frame(x) %>% rownames_to_column('ENSEMBLID') %>% rename(score = x)
+  
+  mapping <- merge(x = mapping, y = orig.genelist, by.x = 'GENEID', by.y = 'ENSEMBLID') %>%
+    arrange(-score) %>%
+    na.omit() %>%
+    select(ENTREZID, score)
+  
+  to.enrich <- mapping$score
+  names(to.enrich) <- mapping$ENTREZID
+  
+  return(gseKEGG(geneList   = to.enrich,
+               organism     = 'hsa',
+               minGSSize    = 120,
+               pvalueCutoff = 0.05,
+               verbose      = FALSE))
+})
+```
+
+```{r}
+lapply(all.kegg, head)
+```
+
+
+```{r save some KEGG pathway results}
+hsa00190 <- pathview(gene.data  = to.enrich,
+                     pathway.id = "hsa00190",
+                     species    = "hsa",
+                     limit      = list(gene=max(abs(to.enrich)), cpd=1))
+
+hsa05208 <- pathview(gene.data = to.enrich, pathway.id = "hsa05208", organism = "hsa", 
+                     limit = list(gene=max(abs(to.enrich)), cpd=1))
+
+```
+
+
+---
+
+## Pathway enrichment analysis (over representation analysis)
+
+Pathway enrichment analysis is done on differentially expressed genes, typically filtered by p-value and logFC. It tests the probability of your genes matching a gene set, against the probability of matching the gene set at random.
+
+
+First, separate the filtered gene lists into upregulated and downregulated genes.
+
+```{r}
+## separate list of up and down regulated genes
+genes.p05up <- lapply(genes.p05, function(x) filter(x, logFC > 0))
+genes.p05dn <- lapply(genes.p05, function(x) filter(x, logFC < 0))
+genes.p01up <- lapply(genes.p01, function(x) filter(x, logFC > 0))
+genes.p01dn <- lapply(genes.p01, function(x) filter(x, logFC < 0))
+genes.p001up <- lapply(genes.p001, function(x) filter(x, logFC > 0))
+genes.p001dn <- lapply(genes.p001, function(x) filter(x, logFC < 0))
+genes.fdr1up <- lapply(genes.fdr1, function(x) filter(x, logFC > 0))
+genes.fdr1dn <- lapply(genes.fdr1, function(x) filter(x, logFC < 0))
+```
+
+Write gene lists to excel.
+
+```{r}
+all.filtered.gene.lists <- list("p0.05upreg" = genes.p05up, "p0.05downreg" = genes.p05dn, 
+                                "p0.01upreg" = genes.p01up, "p0.01downreg" = genes.p01dn, 
+                                "p0.001upreg" = genes.p001up, "p0.001downreg" = genes.p001dn, 
+                                "fdr0.1upreg" = genes.fdr1up, "fdr0.1downreg" = genes.fdr1dn)
+
+## function to write gene lists to excel
+write_results <- function(list_of_datasets){
+  mb_nb.res <- list()
+  mw_nb.res <- list()
+  nb_nw.res <- list()
+  mb_mw.res <- list()
+  mb_nw.res <- list()
+  mw_nw.res <- list()
+  
+  
+  for (i in names(list_of_datasets)){
+    for (j in names(list_of_datasets[[i]])){
+      if (j == "mb_nb"){
+        mb_nb.res[[i]] <- list_of_datasets[[i]][[j]]
+      } else if (j == "mw_nb"){
+        mw_nb.res[[i]] <- list_of_datasets[[i]][[j]]
+      } else if (j == "nb_nw"){
+        nb_nw.res[[i]] <- list_of_datasets[[i]][[j]]
+      } else if (j == "mb_nb"){
+        mb_nb.res[[i]] <- list_of_datasets[[i]][[j]]
+      } else if (j == "mb_mw"){
+        mb_mw.res[[i]] <- list_of_datasets[[i]][[j]]
+      } else if (j == "mb_nw"){
+        mb_nw.res[[i]] <- list_of_datasets[[i]][[j]]
+      } else if (j == "mw_nw"){
+        mw_nw.res[[i]] <- list_of_datasets[[i]][[j]]
+      }
+    }
+  }
+  return(list("mb_nb" = mb_nb.res, "mw_nb" = mw_nb.res, "nb_nw" = nb_nw.res, 
+         "mb_mw" = mb_mw.res, "mb_nw" = mb_nw.res, "mw_nw" = mw_nw.res))
+}
+```
+
+```{r eval=FALSE}
+to_write <- write_results(all.filtered.gene.lists)
+
+invisible(lapply(names(to_write), function(name) {
+  write.xlsx(to_write[[name]], file = paste0("./filtered_gene_lists/", name, "_filtered_gene_lists.xlsx"), rowNames = T)
+  }
+))
+```
+
+
+Write functions to take gene lists an input and run an over representation analysis against a specified database. Here, I will be using GO (gene ontology database) and the H (hallmark) and C6 (oncogenic gene set) from MSigDb (molecular signatures database).
+
+```{r}
+## function to run over representation analysis on GO database
+runenrichGO <- function(x){
+  enrichGO(gene = AnnotationDbi::select(org.Hs.eg.db, keys = rownames(x), columns='ENTREZID', keytype='ENSEMBL') %>% pull(ENTREZID), ont = "ALL", OrgDb = org.Hs.eg.db, readable = TRUE)
+}
+
+
+## prepare dataframe for MSigDb search
+hmk <- msigdbr::msigdbr(species = "Homo sapiens", category = "H") %>% dplyr::select(gs_name, entrez_gene)
+C6 <- msigdbr::msigdbr(species = "Homo sapiens", category = "C6") %>% dplyr::select(gs_name, entrez_gene)
+m_df <- rbind(hmk, C6) ## I will search against Hallmark Gene Set and Oncogene Set
+
+
+## function to run over representation analysis on Molecular Signatures Database
+runMsigdbEnricher <- function(x){
+  enricher(AnnotationDbi::select(org.Hs.eg.db, keys = rownames(x), columns='ENTREZID', keytype='ENSEMBL') %>% pull(ENTREZID), TERM2GENE = m_df)
+}
+```
+
+#### Run over representation analysis
+
+```{r, message=FALSE}
+## create list to hold all filtered gene lists (up and down regulated)
+filtered.geneLists <- list("genes.p05up" = genes.p05up, "genes.p05dn" = genes.p05dn, "genes.p01up" = genes.p01up, "genes.p01dn" = genes.p01dn, "genes.p001up" = genes.p001up, "genes.p001dn" = genes.p001dn, "genes.fdr1up" = genes.fdr1up, "genes.fdr1dn" = genes.fdr1dn)
+
+
+## run analysis on over representated pathways in GO and MSigDb
+all.ego.res <- lapply(filtered.geneLists, function(y) lapply(y, runenrichGO))
+all.msigdb.res <- lapply(filtered.geneLists, function(y) lapply(y, runMsigdbEnricher))
+```
+
+```{r, eval=FALSE}
+## split results into their respective comparisons (ex: Malignant African vs Nonmalignant African)
+msigdb_to_write <- write_results(all.msigdb.res)
+ego_to_write <- write_results(all.ego.res)
+
+
+## each excel sheet will contain all pathway analysis results for one comparison
+## the tabs on each sheet will be separated by filtering and whether an upregulated or downregulated list was used for the comparison (ex: p < 0.01, upregulated gene list)
+
+invisible(lapply(names(msigdb_to_write), function(name) {
+  write.xlsx(msigdb_to_write[[name]], file = paste0("./MSigDb_ORA_results/", name, ".xlsx"), rowNames = T)
+  }
+))
+
+invisible(lapply(names(msigdb_to_write), function(name) {
+  write.xlsx(msigdb_to_write[[name]], file = paste0("./GO_ORA_results/", name, ".xlsx"), rowNames = T)
+  }
+))
+```
+
+```{r eval=FALSE,include=FALSE}
+filtered.geneLists$genes.p05up$mb_nb
+### KEGG ORA
+mkk <- enrichMKEGG(gene = bitr(rownames(filtered.geneLists$genes.p05up$mb_nb), fromType = "GENEID",
+                               toType = "ENTREZID", OrgDb = EnsDb.Hsapiens.v86) %>% pull(ENTREZID),
+                   keyType = 'ncbi-geneid',
+                   organism = 'hsa',
+                   pvalueCutoff = 1,
+                   qvalueCutoff = 1)
+
+head(mkk)
+
+
+```
+
+---
+
+### Molecular Pathways Plots
+
+```{r}
+#cnetplot(all.ego.res$genes.p05up$mb_nb)
+```
+
+---
+
+
+
+
+
+## DESeq2
+
+Try to run DESeq2 out of curiosity
+
+```{r Run DESeq2, message=FALSE, eval=FALSE}
+run_DESeq <- function(set) {
+  x <- set$x
+  dds <- DESeqDataSetFromMatrix(countData = counts(set), colData = pData(set), design = ~W_1 + x)
+  dds <- DESeq(dds)
+  res <- results(dds)
+  return(res)
+}
+
+all.deseq.res <- lapply(all.sets.norm.nc, run_DESeq)
+
+## convert to data frame
+#all.deseq.res <- lapply(all.deseq.res, as.data.frame)
+
+## add gene symbols
+#all.deseq.res.sym <- lapply(all.deseq.res, add_gene_sym)
+
+#lapply(names(all.deseq.res.sym), function(x) EnhancedVolcano(all.deseq.res.sym[[x]], x = "log2FoldChange", y = "padj", lab = all.deseq.res.sym[[x]]$SYMBOL,
+#                                                       title = x %>%
+#                                                         str_replace_all("n", "Non-Malignant ") %>%
+#                                                         str_replace_all("m", "Malignant ") %>%
+#                                                         str_replace_all("b", "African") %>%
+#                                                         str_replace_all("w", "Caucasian") %>%
+#                                                         str_replace_all("_", " -VS- "),
+#                                                       subtitle = "p-value cutoff: 0.05 | log2-fold change cutoff: 1", col = c("gray", "red2", "yellow1", "blue3")
+#                                                      ))
+```
+
+```{r, eval=FALSE, include=FALSE}
+lapply(all.deseq.res, function(x) as.data.frame(x) %>% filter(pvalue < 0.05))
+```
+

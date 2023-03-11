@@ -1,0 +1,185 @@
+---
+title: "Prostate Cancer Secondary Analysis With Validation Cohort"
+author: "Flemming Wu"
+---
+
+```{r setup, include=F}
+if (Sys.info()["sysname"] == "Windows") {
+  knitr::opts_chunk$set(root.dir="~/velvilab/P_Ca_Secondary")
+} else if (Sys.info()["sysname"] == "Darwin") {
+  setwd("~/Desktop/velvilab/P_Ca_Analysis")
+}
+knitr::opts_chunk$set(fig.width=6, fig.height=4)
+```
+
+
+```{r load libs, message=F}
+library(tidyverse)
+library(RUVSeq)
+library(readxl)
+library(RColorBrewer)
+library(EnsDb.Hsapiens.v86)
+```
+
+```{r}
+key <- read_xlsx("./Manifest/P_Ca_sec_manifest_030923.xlsx")
+head(key)
+```
+
+```{r read in one file}
+test.file <- read.table(
+  file="./Count_Table/ENRIQUERNA_0001_01_PROSTATE_SRR10238298_C1_NEBKAP_A00001.proj.Aligned.out.sorted.md.bam.htSeqCounts"
+)
+head(test.file)
+nrow(test.file)
+```
+
+```{r read in counts from Count Table directory}
+## I have checked, and all files should have same the same genes listed in the same order
+
+# create new df to hold count matrix
+df <- as.data.frame(matrix(0, ncol = 0, nrow = nrow(test.file)))
+for (i in list.files(path="./Count_Table")) {
+  name <- str_extract(i, "SRR[0-9]{8}")
+  df[[name]] <- read.table(file=paste0("./Count_Table/",i)) %>% pull(V2) # read in vector of counts to new column
+}
+
+# assign gene names to the row names
+row.names(df) <- test.file$V1 
+
+# assign African American or Caucasian American to sample names
+names(df) <- ifelse(names(df) %in% key$`African American`, paste(names(df), "Afr", sep="_"), paste(names(df), "Cau", sep="_"))
+```
+
+```{r view prepared dataset}
+#dim(df) # 58,785 genes and 59 samples
+df
+```
+
+Filter out lowly expressed genes
+
+```{r filtering}
+# filter criteria:
+## need a read count of more than 5 in at least 15 samples (about 25% of the samples)
+df_unfiltered <- df # save unfiltered dataframe as df_unfiltered
+df <- df[apply(df, 1, function(x) length(x[x>5])>=15),]
+```
+
+Left with 27,786 genes after the filtering
+
+
+Exploratory data analysis
+
+```{r create expression set object}
+x <- names(df) %>% str_extract("Afr$|Cau$") %>% as.factor()
+set <- newSeqExpressionSet(as.matrix(df), phenoData = data.frame(x, row.names = colnames(df)))
+set
+```
+
+```{r plot RLE and PCA prior to normalization, fig.width=12}
+colors <- brewer.pal(3, "Set1")
+par(mfrow=c(1,2))
+plotRLE(set, outline = FALSE, ylim = c(-4,4), col = colors[x])
+plotPCA(set, col = colors[x], cex = 0.7)
+mtext("Before Normalization", side = 3, line = -1, outer = TRUE)
+```
+
+Normalize
+
+```{r upper quartile normalization, fig.width=12}
+set <- betweenLaneNormalization(set, which = "upper")
+par(mfrow=c(1,2))
+plotRLE(set, outline = FALSE, ylim = c(-4,4), col = colors[x])
+plotPCA(set, col = colors[x], cex = 0.7)
+mtext("After Normalization", side = 3, line = -1, outer = TRUE)
+```
+
+Obtain least significantly DE genes (based on first-pass DE analysis before) as negative control for removing unwanted variation
+
+```{r run first pass DEG analysis}
+design.matrix <- model.matrix(~x, data=pData(set)) # create design matrix
+
+y <- DGEList(counts=counts(set), group=x) # create DGEList object from table of counts and group indicator
+
+y <- calcNormFactors(y, method="upperquartile") # calculate scaling factors to convert raw library sizes into effective library sizes
+
+y <- estimateGLMCommonDisp(y, design.matrix) # Estimates a common negative binomial dispersion parameter for a DGE dataset
+
+y <- estimateGLMTagwiseDisp(y, design.matrix) # compute empirical Bayes estimate of negative binomial dispersion parameter for each tag
+
+fit <- glmFit(y, design.matrix) # Fit a negative binomial generalized log-linear model to the read counts for each gene and conduct genewise statistical tests
+lrt <- glmLRT(fit, coef=2)
+
+top <- topTags(lrt, n=nrow(set))$table
+neg.ctrl <- rownames(set)[which(!(rownames(set) %in% rownames(top)[1:5000]))] ## all but the top 5000 genes are negative controls
+```
+
+Remove unwanted variation with negative control genes
+
+```{r RUVg, fig.width=12}
+set2 <- RUVg(set, neg.ctrl, k=1)
+par(mfrow=c(1,2))
+plotRLE(set2, outline = FALSE, ylim = c(-4,4), col = colors[x])
+plotPCA(set2, col = colors[x], cex = 0.7)
+mtext("After accounting for negative controls", side = 3, line = -1, outer = TRUE)
+```
+
+Run final DEG analysis with `edgeR`
+
+```{r run second pass DEG analysis}
+design.matrix <- model.matrix(~x + W_1, data=pData(set2)) # create design matrix
+
+y <- DGEList(counts=counts(set2), group=x) # create DGEList object from table of counts and group indicator
+
+y <- calcNormFactors(y, method="upperquartile") # calculate scaling factors to convert raw library sizes into effective library sizes
+
+y <- estimateGLMCommonDisp(y, design.matrix) # Estimates a common negative binomial dispersion parameter for a DGE dataset
+
+y <- estimateGLMTagwiseDisp(y, design.matrix) # compute empirical Bayes estimate of negative binomial dispersion parameter for each tag
+
+fit <- glmFit(y, design.matrix) # Fit a negative binomial generalized log-linear model to the read counts for each gene and conduct genewise statistical tests
+lrt <- glmLRT(fit, coef=2)
+
+df.res <- as.data.frame(topTags(lrt, n=nrow(lrt)))
+```
+
+```{r}
+for (i in c(0.05, 0.01, 0.001)) {
+  print(paste("P-value:", i, sep=" "))
+  print(summary(decideTests(lrt, adjust.method="none", p.value=i)))
+}
+print("FDR: 0.1")
+summary(decideTests(lrt, adjust.method="fdr", p.value=0.1))
+```
+
+```{r}
+head(df.res)
+```
+
+```{r}
+addGeneSym <- function(df) {
+  # remove "." from ensembl gene id
+  rownames(df) <- sub("\\.[0-9]*$", "", rownames(df))
+  # map ensembl geneid to gene symbol
+  geneids <- ensembldb::select(x = EnsDb.Hsapiens.v86,  key=rownames(df), columns=c("SYMBOL"), keytype="GENEID")
+  rownames(geneids) <- geneids$GENEID
+  
+  # merge mapping back to original dataframe
+  df <- merge(x = df, y = geneids, by = "row.names", all = TRUE) %>%
+    column_to_rownames(var = "Row.names") %>%
+    relocate(SYMBOL, .before = logFC) %>%
+    dplyr::select(!starts_with("GENEID"))
+  
+  return(df)
+}
+
+df.res.sym <- addGeneSym(df.res)
+df.res.sym <- arrange(df.res.sym, PValue)
+```
+
+```{r}
+# positive logFC means upregulated in Caucasian Americans compared to African Americans and vice versa for negative logFC
+df.res.sym
+```
+
+
