@@ -1,5 +1,0 @@
-"0","if (Sys.info()[""sysname""] == ""Windows"") {"
-"0","  knitr::opts_chunk$set(root.dir=""~/velvilab/P_Ca_Secondary"")"
-"0","} else if (Sys.info()[""sysname""] == ""Darwin"") {"
-"0","  setwd(""~/Desktop/velvilab/P_Ca_Analysis"")"
-"0","}"
