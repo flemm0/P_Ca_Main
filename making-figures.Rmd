@@ -1,0 +1,220 @@
+---
+title: "Generating Plots for Prostate Cancer Analysis"
+author: "Flemming Wu"
+subtitle: "Using DESeq2 for the DE Analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+if (Sys.info()["sysname"] == "Windows") {
+  knitr::opts_chunk$set(root.dir="~/velvilab/P_Ca_Secondary")
+} else if (Sys.info()["sysname"] == "Darwin") {
+  knitr::opts_chunk$set(rroot.dir="~/Desktop/velvilab/P_Ca_Analysis")
+}
+knitr::opts_chunk$set(fig.width=12, fig.height=12, echo=TRUE)
+```
+
+## Load libraries and set up data
+
+```{r}
+library(tidyverse)
+library(RUVSeq)
+library(readxl)
+library(RColorBrewer)
+library(EnsDb.Hsapiens.v86)
+library(org.Hs.eg.db)
+library(EnhancedVolcano)
+library(ggpubr)
+library(clusterProfiler)
+library(enrichplot)
+library(DESeq2)
+library(patchwork)
+```
+
+```{r}
+key <- read_xlsx("./Manifest/P_Ca_sec_manifest_030923.xlsx")
+test.file <- read.table(file="./Count_Table/ENRIQUERNA_0001_01_PROSTATE_SRR10238298_C1_NEBKAP_A00001.proj.Aligned.out.sorted.md.bam.htSeqCounts")
+
+df <- as.data.frame(matrix(0, ncol = 0, nrow = nrow(test.file)))
+for (i in list.files(path="./Count_Table")) {
+  name <- str_extract(i, "SRR[0-9]{8}")
+  df[[name]] <- read.table(file=paste0("./Count_Table/",i)) %>% pull(V2) # read in vector of counts to new column
+}
+
+# assign gene names to the row names
+row.names(df) <- test.file$V1 
+
+# assign African American or Caucasian American to sample names
+names(df) <- ifelse(names(df) %in% key$`African American`, paste(names(df), "Afr", sep="_"), paste(names(df), "Cau", sep="_"))
+```
+
+
+
+## Run pipeline
+
+```{r define functions}
+addGeneSym <- function(df) {
+  # remove "." from ensembl gene id
+  rownames(df) <- sub("\\.[0-9]*$", "", rownames(df))
+  # map ensembl geneid to gene symbol
+  geneids <- ensembldb::select(x = EnsDb.Hsapiens.v86,  key=rownames(df), columns=c("SYMBOL"), keytype="GENEID")
+  rownames(geneids) <- geneids$GENEID
+  
+  # merge mapping back to original dataframe
+  df <- merge(x = df, y = geneids, by = "row.names", all = TRUE) %>%
+    column_to_rownames(var = "Row.names") %>%
+    relocate(SYMBOL, .before = baseMean) %>%
+    dplyr::select(!starts_with("GENEID"))
+  
+  return(df)
+}
+```
+
+```{r warning=F}
+df <- df[apply(df, 1, function(x) length(x[x>5])>=15),]
+
+x <- names(df) %>% str_extract("Afr$|Cau$") %>% as.factor()
+set <- newSeqExpressionSet(as.matrix(df), phenoData = data.frame(x, row.names = colnames(df)))
+
+set <- betweenLaneNormalization(set, which = "upper")
+
+design <- model.matrix(~x, data=pData(set))
+y <- DGEList(counts=counts(set), group=x)
+y <- calcNormFactors(y, method="upperquartile")
+y <- estimateGLMCommonDisp(y, design)
+y <- estimateGLMTagwiseDisp(y, design)
+fit <- glmFit(y, design)
+res <- residuals(fit, type="deviance")
+
+set2 <- RUVr(set, rownames(set), k=9, res)
+
+dds <- DESeqDataSetFromMatrix(countData = counts(set2), colData = pData(set2), design = ~W_1 + x)
+dds <- DESeq(dds)
+res <- results(dds)
+res <- na.omit(res)
+res <- res[res$baseMean > 50,] # filter out lowly expressed genes to reduce noise
+
+df.res.ca <- as.data.frame(res) %>% arrange(pvalue)
+
+df.res.ca.sym <- addGeneSym(df.res.ca)
+df.res.ca.sym <- arrange(df.res.ca.sym, pvalue)
+```
+
+---
+
+## Volcano Plot
+
+```{r}
+p1 <- EnhancedVolcano(df.res.sym, x = "log2FoldChange", y = "pvalue", lab = df.res.sym$SYMBOL,
+                title = "Comparison: African American x Caucasian American - DESeq2",
+                subtitle = "p-value cutoff: 0.05 | log2-fold change cutoff: 1",
+                col = c("gray", "#4bd0fe", "red1", "#fef84b")
+)
+
+if (!file.exists('./figures/volcano_plot.jpeg')) {
+  ggsave(
+    filename='./figures/volcano_plot.jpeg',
+    plot=p1, dpi=800, width = 9, height = 11,
+    units = "in"
+  )
+}
+```
+
+
+## MA Plot
+
+```{r}
+to.plot <- df.res.sym %>%
+  mutate(baseMean = log2(baseMean)) %>%
+  dplyr::rename(baseMeanLog2 = baseMean)
+  
+p2 <- ggmaplot(data = to.plot, 
+           main = "Comparison: African American x Caucasian American - DESeq2",
+           fdr = 0.1, fc = 2, size = 0.4,
+           palette = c("#7AFF96", "#FF7A7A", "darkgray"),
+           genenames = to.plot$SYMBOL,
+           legend = "top", top = 30,
+           select.top.method = "padj",
+           font.label = c("bold", 9), label.rectangle = FALSE,
+           font.legend = "bold",
+           font.main = "bold",
+           xlab = "log2 Base Mean",
+           ggtheme = ggplot2::theme_minimal()
+           )
+
+if (!file.exists('./figures/ma_plot.jpeg')) {
+  ggsave(
+    filename='./figures/ma_plot.jpeg',
+    plot=p2, dpi=800, width = 11, height = 9,
+    units = "in"
+  )
+}
+```
+
+
+## GSEA
+
+First, reverse order of factors when performing DE analysis, so that upregulated genes in AA are on top of list
+
+```{r warning=F, message=F}
+x <- names(df) %>% str_extract("Afr$|Cau$") %>% as.factor() %>% fct_rev()
+set <- newSeqExpressionSet(as.matrix(df), phenoData = data.frame(x, row.names = colnames(df)))
+
+set <- betweenLaneNormalization(set, which = "upper")
+
+design <- model.matrix(~x, data=pData(set))
+y <- DGEList(counts=counts(set), group=x)
+y <- calcNormFactors(y, method="upperquartile")
+y <- estimateGLMCommonDisp(y, design)
+y <- estimateGLMTagwiseDisp(y, design)
+fit <- glmFit(y, design)
+res <- residuals(fit, type="deviance")
+
+set2 <- RUVr(set, rownames(set), k=9, res)
+
+dds <- DESeqDataSetFromMatrix(countData = counts(set2), colData = pData(set2), design = ~W_1 + x)
+dds <- DESeq(dds)
+res <- results(dds)
+res <- na.omit(res)
+res <- res[res$baseMean > 50,] # filter out lowly expressed genes to reduce noise
+
+df.res.aa <- as.data.frame(res) %>% arrange(pvalue)
+
+df.res.aa.sym <- addGeneSym(df.res.aa)
+df.res.aa.sym <- arrange(df.res.aa.sym, pvalue)
+```
+
+
+```{r warning=F}
+ranked.gene.list.aa <- df.res.aa %>%
+  mutate(rank = log2FoldChange * -log10(pvalue)) %>% ## here I rank by multiplying logFC by -log10(pvalue) to give more weight to more significant genes
+  rownames_to_column(var = "ENSEMBL") %>% 
+  mutate(ENSEMBL = str_replace(ENSEMBL, ".[0-9]{1,2}$", "")) %>% 
+  dplyr::select(ENSEMBL, stat) %>%
+  arrange(-stat) %>%
+  tibble::deframe()
+
+ranked.gene.list.ca <- df.res.ca %>%
+  mutate(rank = log2FoldChange * -log10(pvalue)) %>% ## here I rank by multiplying logFC by -log10(pvalue) to give more weight to more significant genes
+  rownames_to_column(var = "ENSEMBL") %>% 
+  mutate(ENSEMBL = str_replace(ENSEMBL, ".[0-9]{1,2}$", "")) %>% 
+  dplyr::select(ENSEMBL, stat) %>%
+  arrange(-stat) %>%
+  tibble::deframe()
+
+
+gsea.go.aa <- gseGO(geneList = ranked.gene.list.aa, OrgDb = org.Hs.eg.db, keyType = "ENSEMBL", minGSSize = 10,
+      maxGSSize = 500, nPermSimple = 10000, pvalueCutoff = 0.05, eps = 1e-300, verbose = F)
+
+gsea.go.ca <- gseGO(geneList = ranked.gene.list.ca, OrgDb = org.Hs.eg.db, keyType = "ENSEMBL", minGSSize = 10,
+      maxGSSize = 500, nPermSimple = 10000, pvalueCutoff = 0.05, eps = 1e-300, verbose = F)
+```
+
+```{r}
+gseaplot2(gsea.go.ca, geneSetID = 1:5, pvalue_table = TRUE, title = "GSEA plot - Top 5 Pathways in Caucasian Americans")
+```
+
+```{r}
+gseaplot2(gsea.go.aa, geneSetID = 1:5, pvalue_table = TRUE, title = "GSEA plot - Top 5 Pathways in African Americans")
+```
+

@@ -1,6 +1,7 @@
 ---
 title: "Prostate Cancer Secondary Analysis With Validation Cohort"
 author: "Flemming Wu"
+subtitle: Using `edgeR` For DE Analysis
 ---
 
 ```{r setup, include=F}
@@ -12,6 +13,7 @@ if (Sys.info()["sysname"] == "Windows") {
 knitr::opts_chunk$set(fig.width=6, fig.height=4)
 ```
 
+Load in required libraries
 
 ```{r load libs, message=F}
 library(tidyverse)
@@ -24,12 +26,20 @@ library(EnhancedVolcano)
 library(ggpubr)
 library(clusterProfiler)
 library(enrichplot)
+library(edgeR)
+library(patchwork)
 ```
+
+## Load in and prepare data
+
+Load in excel file to map samples to type
 
 ```{r}
 key <- read_xlsx("./Manifest/P_Ca_sec_manifest_030923.xlsx")
 head(key)
 ```
+
+Read in one count table
 
 ```{r read in one file}
 test.file <- read.table(
@@ -38,6 +48,8 @@ test.file <- read.table(
 head(test.file)
 nrow(test.file)
 ```
+
+Read all count tables into R and prepare genes x samples count matrix
 
 ```{r read in counts from Count Table directory}
 ## I have checked, and all files should have same the same genes listed in the same order
@@ -58,7 +70,7 @@ names(df) <- ifelse(names(df) %in% key$`African American`, paste(names(df), "Afr
 
 ```{r view prepared dataset}
 #dim(df) # 58,785 genes and 59 samples
-df
+head(df)[,1:5]
 ```
 
 Filter out lowly expressed genes
@@ -73,7 +85,9 @@ df <- df[apply(df, 1, function(x) length(x[x>5])>=15),]
 Left with 27,786 genes after the filtering
 
 
-Exploratory data analysis
+### Exploratory data analysis
+
+Create expression set object from count matrix
 
 ```{r create expression set object}
 x <- names(df) %>% str_extract("Afr$|Cau$") %>% as.factor()
@@ -81,7 +95,7 @@ set <- newSeqExpressionSet(as.matrix(df), phenoData = data.frame(x, row.names = 
 set
 ```
 
-```{r plot RLE and PCA prior to normalization, fig.width=12}
+```{r plot RLE and PCA prior to normalization, fig.width=12, fig.height=6}
 colors <- brewer.pal(3, "Set1")
 par(mfrow=c(1,2))
 plotRLE(set, outline = FALSE, ylim = c(-4,4), col = colors[x])
@@ -89,15 +103,17 @@ plotPCA(set, col = colors[x], cex = 0.7)
 mtext("Before Normalization", side = 3, line = -1, outer = TRUE)
 ```
 
-Normalize
+### Initial data normalization
 
-```{r upper quartile normalization, fig.width=12}
+```{r upper quartile normalization, fig.width=12, fig.height=6}
 set <- betweenLaneNormalization(set, which = "upper")
 par(mfrow=c(1,2))
 plotRLE(set, outline = FALSE, ylim = c(-4,4), col = colors[x])
 plotPCA(set, col = colors[x], cex = 0.7)
 mtext("After Normalization", side = 3, line = -1, outer = TRUE)
 ```
+
+### Remove covariates that are not of interest in comparison (AA vs CA)
 
 #### `RUVSeq` offers 3 methods for removing unwanted variation in RNASeq analysis
 
@@ -107,7 +123,7 @@ mtext("After Normalization", side = 3, line = -1, outer = TRUE)
 
 3. `RUVr`: Estimating the factors of unwanted variation using residuals
 
-I will try all three methods and evaluate which normalization method separates African American samples and Caucasian samples by visualizing the separation on the PCA space.
+I will try all three methods and evaluate which normalization method separates African American samples and Caucasian samples *best* by visualizing the separation on the PCA space.
 
 
 #### `RUVg`
@@ -197,15 +213,15 @@ Using k = 9 from `RUVr` gives the clearest separation between groups on the firs
 
 Remove unwanted variation with pearson residuals.
 
-```{r RUVg, fig.width=12}
-set2 <- RUVr(set, rownames(set), k=8, res)
+```{r RUVg, fig.width=12, fig.height=6}
+set2 <- RUVr(set, rownames(set), k=9, res)
 par(mfrow=c(1,2))
 plotRLE(set2, outline = FALSE, ylim = c(-4,4), col = colors[x])
 plotPCA(set2, col = colors[x], cex = 0.7)
 mtext("After normalizing with deviance residuals", side = 3, line = -1, outer = TRUE)
 ```
 
-Run final DEG analysis with `edgeR`
+### Run final DEG analysis with `DESeq2`
 
 ```{r run second pass DEG analysis}
 design.matrix <- model.matrix(~x + W_1, data=pData(set2)) # create design matrix
@@ -224,20 +240,12 @@ lrt <- glmLRT(fit, coef=2)
 df.res <- as.data.frame(topTags(lrt, n=nrow(lrt)))
 ```
 
-```{r}
-for (i in c(0.05, 0.01, 0.001)) {
-  print(paste("P-value:", i, sep=" "))
-  print(summary(decideTests(lrt, adjust.method="none", p.value=i)))
-}
-print("FDR: 0.1")
-summary(decideTests(lrt, adjust.method="fdr", p.value=0.1))
+```{r view DESeq2 results}
+head(df.res, n = 10)
 ```
 
-```{r}
-head(df.res)
-```
 
-```{r}
+```{r add gene symbol to results}
 addGeneSym <- function(df) {
   # remove "." from ensembl gene id
   rownames(df) <- sub("\\.[0-9]*$", "", rownames(df))
@@ -258,22 +266,26 @@ df.res.sym <- addGeneSym(df.res)
 df.res.sym <- arrange(df.res.sym, PValue)
 ```
 
-```{r}
-# positive logFC means upregulated in Caucasian Americans compared to African Americans and vice versa for negative logFC
-df.res.sym
+##### Positive logFC means upregulated in Caucasian Americans compared to African Americans and vice versa for negative logFC
+
+```{r view DESeq2 results with gene symbol}
+head(df.res.sym, n = 20) 
 ```
 
-Volcano PLot
 
-```{r volcano plot}
+### Visualization of significant genes
+
+Volcano Plot
+
+```{r volcano plot, fig.width=10, fig.height=9}
 EnhancedVolcano(df.res.sym, x = "logFC", y = "PValue", lab = df.res.sym$SYMBOL,
-                title = "Comparison: African American x Caucasian American",
+                title = "Comparison: African American x Caucasian American - DESeq2",
                 subtitle = "p-value cutoff: 0.05 | log2-fold change cutoff: 1",
                 col = c("gray", "#4bd0fe", "red1", "#fef84b")
 )
 ```
 
-```{r MA plot}
+```{r MA plot,fig.width=12, fig.height=7}
 to.plot <- df.res.sym %>%
   dplyr::rename(log2FoldChange = logFC, baseMeanLog2 = logCPM, padj = PValue)
 
@@ -294,7 +306,11 @@ ggmaplot(data = to.plot,
            )
 ```
 
-#### GSEA
+### Gene set enrichment analysis
+
+GSEA requires a *ranked* list of all genes. There is no need to separate up and downregulated genes, or filter the gene list, as the ranking should place unsignificant genes in the middle of the ranked list.
+
+However, there is no set rule for ranking the list of genes. The method that I will use to rank genes is to multiply the log fold-change by the -log10 p-value. This ranking allows one to take into account the *change* in gene expression between the two groups, as well as the significance of the gene.
 
 ```{r prepare ranked gene list}
 ranked.gene.list <- lrt %>%
@@ -307,38 +323,39 @@ ranked.gene.list <- lrt %>%
   tibble::deframe()
 ```
 
-```{r go gsea}
+```{r go gsea, warning=F}
 gsea.go <- gseGO(geneList = ranked.gene.list, OrgDb = org.Hs.eg.db, keyType = "ENSEMBL", minGSSize = 10,
       maxGSSize = 500, nPermSimple = 10000, pvalueCutoff = 0.05, eps = 1e-300, verbose = F)
 
-head(gsea.go)
-```
-
-```{r}
-gsea.go@result
+#head(gsea.go)
 ```
 
 GSEA plot for top enriched pathway
 
-```{r}
+```{r fig.width=10, fig.height=10}
 gseaplot2(gsea.go, geneSetID = 1, title = gsea.go$Description[1], pvalue_table = TRUE)
 ```
-```{r}
+
+```{r include=FALSE, eval=FALSE}
 gseaplot(gsea.go, geneSetID = 1, title = gsea.go$Description[1])
 ```
 
 
 GSEA plot for top 5 enriched pathways
 
-```{r}
-gseaplot2(gsea.go, geneSetID = 1:5, pvalue_table = TRUE)
+```{r fig.width=10, fig.height=10}
+gseaplot2(gsea.go, geneSetID = 1:5, pvalue_table = TRUE, title = "GSEA plot - Top 5 Pathways in Caucasian Americans")
 ```
 
-```{r fig.height=8}
-dotplot(gsea.go, showCategory = 30)
+```{r fig.height=12, fig.width=10}
+dotplot(gsea.go, showCategory = 30) + ggtitle("GSEA Identified Top 30 Upregulated GO Pathways in Caucasian Americans")
 ```
 
-#### Enrichment analysis with filtered gene lists
+### Overrepresentation analysis
+
+GO Enrichment analysis with filtered gene lists
+
+split gene lists into up and downregulated filtered by pvalue cutoff
 
 ```{r split gene lists into up and downregulated filtered by pvalue cutoffs}
 p.05.up <- filter(df.res.sym, (PValue < 0.05) & (logFC > 0))
@@ -350,8 +367,8 @@ p.01.dn <- filter(df.res.sym, (PValue < 0.01) & (logFC < 0))
 p.001.up <- filter(df.res.sym, (PValue < 0.001) & (logFC > 0))
 p.001.dn <- filter(df.res.sym, (PValue < 0.001) & (logFC < 0))
 
-fdr.1.up <- filter(df.res.sym, (FDR < 0.1) & (logFC > 0))
-fdr.1.dn <- filter(df.res.sym, (FDR < 0.1) & (logFC < 0))
+fdr.1.up <- filter(df.res.sym, (PValue < 0.1) & (logFC > 0))
+fdr.1.dn <- filter(df.res.sym, (PValue < 0.1) & (logFC < 0))
 ```
 
 ```{r create list of filtered results}
@@ -361,14 +378,14 @@ filtered.res <- list("p.05.up" = p.05.up, "p.05.dn" = p.05.dn,
                      "fdr.1.up" = fdr.1.up, "fdr.1.dn" = fdr.1.dn)
 ```
 
-```{r}
+```{r GO enrichment, message=F}
 run_enrichGO <- function(x) {
   return(enrichGO(
     gene = AnnotationDbi::select(org.Hs.eg.db, 
                                       keys = rownames(x), 
                                       columns='ENTREZID', 
                                       keytype='ENSEMBL') %>% pull(ENTREZID), 
-    ont = "ALL", 
+    ont = "BP", 
     OrgDb = org.Hs.eg.db, 
     readable = TRUE
   ))
@@ -380,15 +397,40 @@ names(ego.res) <- names(filtered.res)
 ego.res <- lapply(ego.res, pairwise_termsim)
 ```
 
-```{r}
-treeplot(ego.res$fdr.1.up)
+```{r fig.width=15, fig.height=12}
+treeplot(ego.res$fdr.1.up) + labs(title = "Upregulated Caucasian American GO: BP Pathways Clustered By Term Similarity", subtitle = "Sig. Genes Cutoff Used: FDR 10%")
 ```
 
-```{r}
-treeplot(ego.res$fdr.1.dn)
+```{r fig.width=15, fig.height=12}
+treeplot(ego.res$fdr.1.dn) + labs(title = "Upregulated African American GO: BP Pathways Clustered By Term Similarity", subtitle = "Sig. Genes Cutoff Used: FDR 10%")
+```
+
+```{r barplots of top 20 pathways, fig.width=16, fig.height=14}
+wrap_plots(
+  barplot(ego.res$fdr.1.up, showCategory=20) + ggtitle("Upreg in Caucasian American"),
+  barplot(ego.res$fdr.1.dn, showCategory=20) + ggtitle("Upreg in African American")
+)
+```
+
+```{r fig.height=2, fig.width=10, eval=F, include=F}
+heatplot(ego.res$fdr.1.up, showCategory = 5)
 ```
 
 
+
+#### KEGG Enrichment analysis with filtered gene lists
+
+```{r, eval=F, include=F}
+mkk <- enrichMKEGG(gene = bitr(rownames(filtered.res$p.05.up), fromType = "GENEID",
+                               toType = "ENTREZID", OrgDb = EnsDb.Hsapiens.v86) %>% pull(ENTREZID),
+                   keyType = 'ncbi-geneid',
+                   organism = 'hsa',
+                   pvalueCutoff = 1,
+                   qvalueCutoff = 1)
+
+head(mkk)
+mkk
+```
 
 
 
