@@ -25,6 +25,7 @@ library(ggpubr)
 library(msigdbr)
 library(enrichplot)
 library(pathview)
+library(ensembldb)
 ```
 
 ```{r read in data, message=F}
@@ -162,15 +163,102 @@ all.sets.norm.nc <- lapply(all.sets.norm, est_neg_ctrl)
 ```
 
 ```{r}
-pData(all.sets.norm.nc$mb_nb)
+lapply(all.sets.norm.nc, pData)
+```
+
+```{r}
+lapply(all.sets.norm.nc, plot_sets)
 ```
 
 
 
+```{r}
+run_glmLRT <- function(newset) {
+  x <- newset$x
+  design <- model.matrix(~x + W_1, data = pData(newset))
+  y <- DGEList(counts = counts(newset), group = x)
+  y <- calcNormFactors(y, method = "upperquartile")
+  y <- estimateGLMCommonDisp(y, design)
+  y <- estimateGLMTagwiseDisp(y, design)
 
+  fit <- glmFit(y, design)
+  lrt <- glmLRT(fit, coef=2)
+  return(lrt)
+}
 
+all.res <- lapply(all.sets.norm.nc, run_glmLRT) ## all.res stores final edgeR results
+```
 
+```{r}
+all.res.df <- lapply(all.res, function(x) as.data.frame(topTags(x, n = nrow(x))))
+all.res.df
+```
 
+Add gene symbols to each dataframe of results
+
+```{r}
+addGeneSym <- function(df) {
+  # remove "." from ensembl gene id
+  rownames(df) <- sub("\\.[0-9]*$", "", rownames(df))
+  # map ensembl geneid to gene symbol
+  geneids <- ensembldb::select(x = EnsDb.Hsapiens.v86,  key=rownames(df), columns=c("SYMBOL"), keytype="GENEID")
+  rownames(geneids) <- geneids$GENEID
+  
+  # merge mapping back to original dataframe
+  df <- merge(x = df, y = geneids, by = "row.names", all = TRUE) %>%
+    column_to_rownames(var = "Row.names") %>%
+    relocate(SYMBOL, .before = logFC) %>%
+    select(!starts_with("GENEID"))
+  
+  return(df)
+}
+
+all.res.df.sym <- lapply(all.res.df, addGeneSym)
+all.res.df.sym <- lapply(all.res.df.sym, function(x) x %>% dplyr::arrange(FDR))
+```
+
+View DEGs for each comparison
+
+```{r}
+lapply(all.res.df.sym, head)
+```
+
+```{r}
+lapply(all.res.df.sym, function(x) x %>% filter(FDR < 0.1))
+```
+
+#### Try removing unwanted variation using `RUVr` method. This method considers residuals from a GLM regression of the counts on the covariates of interest.
+
+```{r}
+est_neg_ctrl2 <- function(set) {
+  x <- set$x
+  design <- model.matrix(~x, data = pData(set))
+  y <- DGEList(counts = counts(set), group = x)
+  y <- calcNormFactors(y, method = "upperquartile")
+  y <- estimateGLMCommonDisp(y, design)
+  y <- estimateGLMTagwiseDisp(y, design)
+
+  fit <- glmFit(y, design)
+  res <- residuals(fit, type = "deviance")
+  
+  # run RUVr
+  newset <- RUVSeq::RUVr(set, row.names(res), k = 1, res)
+  return(newset)
+}
+
+all.sets.norm.nc2 <- lapply(all.sets.norm, est_neg_ctrl2)
+```
+
+```{r}
+all.res2 <- lapply(all.sets.norm.nc2, run_glmLRT)
+all.res.df2 <- lapply(all.res2, function(x) as.data.frame(topTags(x, n = nrow(x))))
+all.res.df.sym2 <- lapply(all.res.df2, addGeneSym)
+all.res.df.sym2 <- lapply(all.res.df.sym2, function(x) x %>% dplyr::arrange(FDR))
+```
+
+```{r}
+lapply(all.res.df.sym, function(x) x %>% filter(FDR < 0.1))
+```
 
 
 
