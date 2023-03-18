@@ -1,0 +1,62 @@
+---
+title: "Prepare Comparisons for Individual Analysis"
+author: "Flemming Wu"
+---
+
+```{r load libraries}
+library(readxl)
+library(tibble)
+library(tidyverse)
+```
+
+```{r}
+data <- read_xlsx("../data/Data_012723.xlsx")
+keys <- read_xlsx("../data/RNAseq_Samples_012723.xlsx")
+```
+
+
+```{r}
+data <- read_xlsx("../data/Data_012723.xlsx")
+data <- column_to_rownames(data, var = "Geneid...1")
+data <- dplyr::select(data, -starts_with("Geneid"))
+
+new.names <- keys %>%
+  mutate(KGP_Sample_ID = stringr::str_extract(KGP_Sample_ID, "00[:digit:]{2}") %>% 
+           stringr::str_replace("00[0]?", "RNA")) %>%
+  mutate(`Tissue Type` = ifelse(`Tissue Type` == "Malignant", "M", "N"), 
+                Race = ifelse(Race == "Black", "B", "W")) %>%
+  tidyr::unite(id, c("Tissue Type", "Race", "MGC_Sample_ID")) %>%
+  arrange(as.integer(str_extract(KGP_Sample_ID, "[:digit:]{1,2}"))) %>%
+  dplyr::select(id) %>%
+  as.list()
+
+names(data) <- new.names$id
+```
+
+```{r}
+# Nonnmalignant black vs malignant black
+mb_nb <- data %>% select_if(grepl("M_B", names(.)) | grepl("N_B", names(.)))
+# Walignant white vs nonmalignant black
+mw_nb <- data %>% select_if(grepl("M_W", names(.)) | grepl("N_B", names(.)))
+# Nonmalignant black vs nonmalignant white
+nb_nw <- data %>% select_if(grepl("N_B", names(.)) | grepl("N_W", names(.)))
+# Malignant black vs malignant white
+mb_mw <- data %>% select_if(grepl("M_B", names(.)) | grepl("M_W", names(.)))
+# Malignant black vs nonmalignant white
+mb_nw <- data %>% select_if(grepl("M_B", names(.)) | grepl("N_W", names(.)))
+# Malignant white vs nonmalignant white
+mw_nw <- data %>% select_if(grepl("M_W", names(.)) | grepl("N_W", names(.)))
+
+## combine into list of datasets
+all.dfs <- list("mb_nb" = mb_nb, "mw_nb" = mw_nb, "nb_nw" = nb_nw, "mb_mw" = mb_mw, "mb_nw" = mb_nw, "mw_nw" = mw_nw)
+```
+
+```{r}
+write.csv(mb_nb, file = "./mal-aa-vs-nonmal-aa/counts.csv")
+write.csv(mw_nb, file = "./mal-ca-vs-nonmal-aa/counts.csv")
+write.csv(nb_nw, file = "./nonmal-aa-vs-nonmal-ca/counts.csv")
+write.csv(mb_mw, file = "./mal-aa-vs-mal-ca/counts.csv")
+write.csv(mb_nw, file = "./mal-aa-vs-nonmal-ca/counts.csv")
+write.csv(mw_nw, file = "./mal-ca-vs-nonmal-ca/counts.csv")
+```
+

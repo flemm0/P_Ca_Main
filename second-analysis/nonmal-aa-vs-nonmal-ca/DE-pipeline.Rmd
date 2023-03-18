@@ -1,0 +1,413 @@
+---
+title: "Differential Expression Analysis Pipeline For Primary Analysis"
+author: "Flemming Wu"
+---
+
+Malignant African American VS Nonmalignant Caucasian American
+
+```{r}
+knitr::opts_chunk$set(root.dir = "~/Desktop/velvilab/P_Ca_Analysis/second-analysis/nonmal-aa-vs-nonmal-ca")
+```
+
+Load libraries and data
+
+```{r load libs, message=F}
+library(tidyverse)
+library(RUVSeq)
+library(readxl)
+library(RColorBrewer)
+library(EnsDb.Hsapiens.v86)
+library(org.Hs.eg.db)
+library(EnhancedVolcano)
+library(ggpubr)
+library(clusterProfiler)
+library(enrichplot)
+library(DESeq2)
+library(patchwork)
+library(openxlsx)
+library(gridExtra)
+```
+
+```{r}
+df <- read.csv("counts.csv", row.names = 1)
+
+df <- df[apply(df, 1, function(x) length(x[x>5])>=3),]
+```
+
+Exploratory data analysis
+
+```{r create expression set object}
+x <- names(df) %>% str_extract("[MN]_[WB]") %>% as.factor()
+set <- newSeqExpressionSet(as.matrix(df), phenoData = data.frame(x, row.names = colnames(df)))
+```
+
+Normalize
+
+```{r upper quartile normalization, fig.width=12}
+colors <- brewer.pal(3, "Set1")
+set <- betweenLaneNormalization(set, which = "upper")
+par(mfrow=c(1,2))
+plotRLE(set, outline = FALSE, ylim = c(-4,4), col = colors[x])
+plotPCA(set, col = colors[x], cex = 0.7)
+mtext("After Normalization", side = 3, line = -1, outer = TRUE)
+```
+
+
+`RUVg`
+
+Obtain least significantly DE genes (based on first-pass DE analysis before) as negative control for removing unwanted variation
+
+```{r run first pass DEG analysis}
+design.matrix <- model.matrix(~x, data=pData(set))
+y <- DGEList(counts=counts(set), group=x)
+y <- calcNormFactors(y, method="upperquartile") 
+y <- estimateGLMCommonDisp(y, design.matrix) 
+y <- estimateGLMTagwiseDisp(y, design.matrix)
+fit <- glmFit(y, design.matrix)
+lrt <- glmLRT(fit, coef=2)
+top <- topTags(lrt, n=nrow(set))$table
+neg.ctrl <- rownames(set)[which(!(rownames(set) %in% rownames(top)[1:5000]))]
+```
+
+```{r vary k for RUVg, fig.width=15, fig.height=15}
+par(mfrow=c(3,3))
+for (i in 1:7) { ## k must be less than number of samples (which is 8 in this case)
+  set2 <- RUVg(set, neg.ctrl, k=i)
+  plotPCA(set2, col=colors[x], cex=0.7)
+}
+```
+
+
+`RUVs`
+
+```{r construct replicates matrix}
+differences <- makeGroups(x)
+```
+
+```{r vary k for RUVs, fig.width=15, fig.height=15}
+par(mfrow=c(3,3))
+for (i in 1:7) {
+  set3 <- RUVs(set, rownames(set), k=i, differences)
+  plotPCA(set3, col=colors[x], cex=0.7)
+}
+```
+
+
+`RUVr`
+
+```{r get deviance residuals}
+design <- model.matrix(~x, data=pData(set))
+y <- DGEList(counts=counts(set), group=x)
+y <- calcNormFactors(y, method="upperquartile")
+y <- estimateGLMCommonDisp(y, design)
+y <- estimateGLMTagwiseDisp(y, design)
+fit <- glmFit(y, design)
+res <- residuals(fit, type="deviance")
+```
+
+```{r vary k for RUVr, fig.width=15, fig.height=15}
+par(mfrow=c(3,3))
+for (i in 1:7) {
+  set4 <- RUVr(set, rownames(set), k=i, res) # Again, we can use all the genes to estimate the factors of unwanted variation
+  plotPCA(set4, col=colors[x], cex=0.7)
+}
+```
+
+Remove unwanted variation with pearson residuals.
+
+Using k = 6 for `RUVr` method.
+
+```{r RUVg, fig.width=12}
+set2 <- RUVr(set, rownames(set), k=6, res)
+par(mfrow=c(1,2))
+plotRLE(set2, outline = FALSE, ylim = c(-4,4), col = colors[x])
+plotPCA(set2, col = colors[x], cex = 0.7)
+#mtext("After normalizing with deviance residuals", side = 3, line = -1, outer = TRUE)
+```
+
+Save PCA plot
+
+```{r}
+if (!file.exists("./plots/PCA_plot.jpeg")) {
+  jpeg(file="./plots/PCA_plot.jpeg", res = 800, width = 10, height = 7, units = "in")
+  plotPCA(set2, col = colors[x], cex = 0.7)
+  dev.off()
+}
+```
+
+
+Run final DEG analysis with `DESeq2`
+
+```{r run DESeq2}
+dds <- DESeqDataSetFromMatrix(countData = counts(set2), colData = pData(set2), design = ~W_1 + x)
+dds <- DESeq(dds)
+res <- results(dds)
+res <- na.omit(res)
+# baseMean is the average of the normalized count values, dividing by size factors, taken over all samples
+res <- res[res$baseMean > 50,] # filter out lowly expressed genes to reduce noise
+```
+
+```{r view DESeq2 results}
+df.res <- as.data.frame(res) %>% arrange(pvalue)
+df.res
+```
+
+```{r add gene symbol to results}
+addGeneSym <- function(df) {
+  # remove "." from ensembl gene id
+  rownames(df) <- sub("\\.[0-9]*$", "", rownames(df))
+  # map ensembl geneid to gene symbol
+  geneids <- ensembldb::select(x = EnsDb.Hsapiens.v86,  key=rownames(df), columns=c("SYMBOL"), keytype="GENEID")
+  rownames(geneids) <- geneids$GENEID
+  
+  # merge mapping back to original dataframe
+  df <- merge(x = df, y = geneids, by = "row.names", all = TRUE) %>%
+    column_to_rownames(var = "Row.names") %>%
+    relocate(SYMBOL, .before = baseMean) %>%
+    dplyr::select(!starts_with("GENEID"))
+  
+  return(df)
+}
+
+df.res.sym <- addGeneSym(df.res)
+df.res.sym <- arrange(df.res.sym, pvalue)
+```
+
+```{r view DESeq2 results with gene symbol}
+df.res.sym
+```
+
+Save all genes
+
+```{r}
+if (!file.exists("./gene-lists/all-genes.xlsx")){
+  write.xlsx(df.res.sym, "./gene-lists/all-genes.xlsx")
+}
+```
+
+
+Volcano PLot
+
+```{r volcano plot, fig.width=12, fig.height=10}
+createTitle <- function(X) {
+  long.name <- levels(X) %>%
+    str_replace("M_B", "Malignant African American") %>%
+    str_replace("N_B", "Nonmalignant African American") %>%
+    str_replace("M_W", "Malignant Caucasian American") %>%
+    str_replace("N_W", "Nonmalignant Caucasian American")
+  
+  long.name[1] <- paste(long.name[1], "(reference)", sep = " ")
+  long.name[2] <- paste(long.name[2], "(comparison)", sep = " ")
+  
+  
+  return(paste(long.name, collapse = " -VS- "))
+  
+}
+
+title <- createTitle(x)
+
+p1 <- EnhancedVolcano(df.res.sym, x = "log2FoldChange", y = "pvalue", lab = df.res.sym$SYMBOL,
+                title = paste(title, "DESeq2", sep = " - "),
+                subtitle = "p-value cutoff: 0.05 | log2-fold change cutoff: 1",
+                col = c("gray", "#4bd0fe", "red1", "#fef84b")
+)
+
+p1
+```
+
+```{r MA plot, fig.width=10, fig.height=6}
+to.plot <- df.res.sym %>%
+  mutate(baseMean = log2(baseMean)) %>%
+  dplyr::rename(baseMeanLog2 = baseMean)
+  
+p2 <- ggmaplot(data = to.plot, 
+           main = paste(title, "DESeq2", sep = " - "),
+           fdr = 0.1, fc = 2, size = 0.4,
+           palette = c("#7AFF96", "#FF7A7A", "darkgray"),
+           genenames = to.plot$SYMBOL,
+           legend = "top", top = 50,
+           select.top.method = "padj",
+           font.label = c("bold", 9), label.rectangle = FALSE,
+           font.legend = "bold",
+           font.main = "bold",
+           xlab = "log2 Base Mean",
+           ggtheme = ggplot2::theme_minimal()
+           )
+
+p2
+```
+
+Save volcano and ma plots
+
+```{r}
+if (!file.exists("./plots/volcano_plot.jpeg")) {
+  ggsave(filename="./plots/volcano_plot.jpeg", p1, dpi = 800, width = 9, height = 11, units = "in")
+}
+
+if (!file.exists("./plots/ma_plot.jpeg")) {
+  ggsave(filename="./plots/ma_plot.jpeg", p2, dpi = 800, width = 10, height = 7, units = "in")
+}
+```
+
+---
+
+GSEA
+
+*reference level (control) in design matrix is the first level of the factor variable, which is the level with the lowest number or letter among the values provided*
+
+Since the reference group in the design matrix is assigned by the level with the lowest number or letter among the values provided, I named the groups to match accordingly.
+
+For example: mb_nb = Nonmalignant black (reference) vs nonmalignant black (comparison), since m comes before n alphabetically
+
+For the initial comparison:
+
+```{r}
+ranked.gene.list <- df.res %>%
+  mutate(rank = log2FoldChange * -log10(pvalue)) %>% 
+  rownames_to_column(var = "ENSEMBL") %>% 
+  mutate(ENSEMBL = str_replace(ENSEMBL, ".[0-9]{1,2}$", "")) %>% 
+  dplyr::select(ENSEMBL, stat) %>%
+  arrange(-stat) %>%
+  tibble::deframe()
+
+gsea.go <- gseGO(geneList = ranked.gene.list, OrgDb = org.Hs.eg.db, keyType = "ENSEMBL", minGSSize = 10,
+      maxGSSize = 500, nPermSimple = 10000, pvalueCutoff = 0.05, eps = 1e-300, verbose = F)
+```
+
+```{r}
+as.data.frame(gsea.go) ## negative enrichment score indicates it is downregulated in comparison group
+
+if(!file.exists("./pathways/GSEA-GO.xlsx")) {
+  write.xlsx(as.data.frame(gsea.go), "./pathways/GSEA-GO.xlsx")
+}
+```
+
+```{r fig.width=10, fig.height=12}
+gseaplot2(gsea.go, geneSetID = 1:10, pvalue_table = TRUE, title = paste(title, "Top 10 Pathways Identified by GSEA", sep = " "))
+
+jpeg(file="./plots/GSEA_plot.jpeg", res = 800, width = 15, height = 15, units = "in")
+gseaplot2(gsea.go, geneSetID = 1:10, pvalue_table = TRUE, title = paste(title, "Top 10 Pathways Identified by GSEA", sep = " "))
+dev.off()
+```
+
+```{r fig.height=12, fig.width=8}
+p <- dotplot(gsea.go, split=".sign", showCategory = 10) + facet_grid(.~.sign) + labs(title = title, subtitle = "GSEA - GO:BP")
+p
+
+if(!file.exists("./plots/GSEA_dotplot.jpeg")) {
+  ggsave(filename="./plots/GSEA_dotplot.jpeg", p, dpi = 800, width = 12, height = 15, units = "in")
+}
+```
+
+```{r fig.height=8, fig.width=8, message=F}
+p <- ridgeplot(gsea.go) + 
+  labs(x = "enrichment distribution", title = title) + 
+  scale_fill_gradient(low = "#e6f43c", high = "#ff4a4a") + 
+  labs(title = title, subtitle = "GSEA - GO:BP")
+
+p
+
+if(!file.exists("./plots/GSEA_ridgeplot.jpeg")) {
+  ggsave(filename="./plots/GSEA_ridgeplot.jpeg", p, dpi = 800, width = 15, height = 15, units = "in")
+}
+```
+
+---
+
+ORA
+
+```{r}
+# separate gene lists
+p.05.up <- filter(df.res.sym, (pvalue < 0.05) & (log2FoldChange > 0))
+p.05.dn <- filter(df.res.sym, (pvalue < 0.05) & (log2FoldChange < 0))
+
+p.01.up <- filter(df.res.sym, (pvalue < 0.01) & (log2FoldChange > 0))
+p.01.dn <- filter(df.res.sym, (pvalue < 0.01) & (log2FoldChange < 0))
+
+p.001.up <- filter(df.res.sym, (pvalue < 0.001) & (log2FoldChange > 0))
+p.001.dn <- filter(df.res.sym, (pvalue < 0.001) & (log2FoldChange < 0))
+
+fdr.1.up <- filter(df.res.sym, (padj < 0.1) & (log2FoldChange > 0))
+fdr.1.dn <- filter(df.res.sym, (padj < 0.1) & (log2FoldChange < 0))
+
+filtered.res <- list("p.05.up" = p.05.up, "p.05.dn" = p.05.dn,
+                     "p.01.up" = p.01.up, "p.01.dn" = p.01.dn,
+                     "p.001.up" = p.001.up, "p.001.dn" = p.001.dn,
+                     "fdr.1.up" = fdr.1.up, "fdr.1.dn" = fdr.1.dn)
+
+
+if (!file.exists("./gene-lists/filtered_gene_lists.xlsx")) {
+  write.xlsx(filtered.res, file = "./gene-lists/filtered_gene_lists.xlsx") 
+}
+```
+
+```{r message=F}
+## function to run over representation analysis on GO database
+runenrichGO <- function(x){
+  enrichGO(gene = AnnotationDbi::select(org.Hs.eg.db, keys = rownames(x), columns='ENTREZID', keytype='ENSEMBL') %>% pull(ENTREZID), ont = "ALL", OrgDb = org.Hs.eg.db, readable = TRUE)
+}
+
+
+## prepare dataframe for Molecular Signatures Database search
+hmk <- msigdbr::msigdbr(species = "Homo sapiens", category = "H") %>% dplyr::select(gs_name, entrez_gene)
+C6 <- msigdbr::msigdbr(species = "Homo sapiens", category = "C6") %>% dplyr::select(gs_name, entrez_gene)
+m_df <- rbind(hmk, C6) 
+
+
+## function to run over representation analysis on Molecular Signatures Database
+runMsigdbEnricher <- function(x){
+  enricher(AnnotationDbi::select(org.Hs.eg.db, keys = rownames(x), columns='ENTREZID', keytype='ENSEMBL') %>% pull(ENTREZID), TERM2GENE = m_df)
+}
+
+all.ego.res <- lapply(filtered.res, runenrichGO)
+all.msig.res <- lapply(filtered.res, runMsigdbEnricher)
+```
+
+```{r}
+if (!file.exists("./pathways/overrepresentation-analysis-GO.xlsx")) {
+  write.xlsx(all.ego.res, file = "./pathways/overrepresentation-analysis-GO.xlsx")
+}
+
+if (!file.exists("./pathways/overrepresentation-analysis-MSigDB.xlsx")) {
+  write.xlsx(all.msig.res, file = "./pathways/overrepresentation-analysis-MSigDB.xlsx")
+}
+```
+
+```{r}
+lapply(all.ego.res, nrow)
+lapply(all.msig.res, nrow)
+```
+
+
+```{r}
+comparisons <- names(all.ego.res) %>%
+  str_replace(".up$", " upregulated") %>%
+  str_replace(".dn$", " downregulated") %>%
+  str_replace("^p", "p-value") %>%
+  str_replace("^fdr", "false discovery rate") %>%
+  str_replace(".0", " 0.0") %>%
+  str_replace("rate.1", "rate 10%")
+```
+
+```{r fig.width=20, fig.height=20}
+#indices <- c(1, 2, 4, 6, 7)
+dotplots <- list()
+barplots <- list()
+for (i in 1:length(all.ego.res)) {
+    dotplots[[i]] <- dotplot(all.ego.res[[i]]) + labs(title = title, subtitle = comparisons[[i]])
+    barplots[[i]] <- barplot(all.ego.res[[i]]) + labs(title = title, subtitle = comparisons[[i]])
+}
+
+p1 <- do.call(grid.arrange, dotplots)
+p2 <- do.call(grid.arrange, barplots)
+
+if (!file.exists("./plots/ORA_GO_dotplots.jpeg")) {
+  ggsave(filename="./plots/ORA_GO_dotplots.jpeg", p1, dpi = 800, width = 30, height = 30, units = "in")
+}
+
+if (!file.exists("./plots/ORA_GO_barplots.jpeg")) {
+  ggsave(filename="./plots/ORA_GO_barplots.jpeg", p2, dpi = 800, width = 30, height = 30, units = "in")
+}
+```
+
+
