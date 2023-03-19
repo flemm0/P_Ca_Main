@@ -6,3 +6,17 @@
 pathways/*
 pathways_copy/*
 kegg-files/*
+.Rproj.user*
+.Rhistory
+.RData
+.Ruserdata
+Count_Table/
+Manifest/
+*.html
+.Rproj.user
+.DS_Store
+.Rproj.user/shared/notebooks/paths
+README.Rmd
+gene-lists/
+pathways/
+figures/
