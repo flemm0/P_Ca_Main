@@ -1,0 +1,299 @@
+---
+title: 'Detailed `edgeR` Workflow on Prostate Cancer RNASeq Analysis Between African Americans and Causasian Americans'
+author: "Flemming Wu"
+---
+
+```{r setup, include=FALSE}
+if (Sys.info()["sysname"] == "Darwin") {setwd("~/Desktop/velvilab/P_Ca_Analysis")}
+if (Sys.info()["sysname"] == "Windows") {setwd("C:/Users/flemm/velvilab/P_Ca_Analysis_012723")}
+```
+
+```{r load libs, message=F}
+library(readxl)
+library(openxlsx)
+library(magrittr)
+library(purrr)
+library(tidyverse)
+library(RUVSeq)
+library(RColorBrewer)
+library(DESeq2)
+library(EnsDb.Hsapiens.v86)
+library(EnhancedVolcano)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(ggpubr)
+library(msigdbr)
+library(enrichplot)
+library(pathview)
+library(ensembldb)
+```
+
+```{r read in data, message=F}
+metadata <- read_xlsx("./data/RNAseq_Samples_012723.xlsx")
+data <- read_xlsx("./data/Data_012723.xlsx")
+```
+
+```{r prepare data}
+# rows containing Ensembl id are the same, set to rownames and remove columns, keeping only read count columns
+data <- column_to_rownames(data, var = "Geneid...1") %>%
+  dplyr::select(-starts_with("Geneid"))
+
+# change sample names to make it shorter for downstream workflow
+new.names <- metadata %>%
+  mutate(KGP_Sample_ID = stringr::str_extract(KGP_Sample_ID, "00[:digit:]{2}") %>% 
+           stringr::str_replace("00[0]?", "RNA")) %>%
+  mutate(`Tissue Type` = ifelse(`Tissue Type` == "Malignant", "M", "N"), 
+                Race = ifelse(Race == "Black", "B", "W")) %>%
+  tidyr::unite(id, c("Tissue Type", "Race", "MGC_Sample_ID")) %>%
+  arrange(as.integer(str_extract(KGP_Sample_ID, "[:digit:]{1,2}"))) %>%
+  dplyr::select(id) %>%
+  as.list()
+
+names(data) <- new.names$id
+
+head(data)
+```
+
+```{r split by comparisons}
+## split data for all comparisons
+
+# Nonnmalignant black vs malignant black
+mb_nb <- data %>% select_if(grepl("M_B", names(.)) | grepl("N_B", names(.)))
+# Walignant white vs nonmalignant black
+mw_nb <- data %>% select_if(grepl("M_W", names(.)) | grepl("N_B", names(.)))
+# Nonmalignant black vs nonmalignant white
+nb_nw <- data %>% select_if(grepl("N_B", names(.)) | grepl("N_W", names(.)))
+# Malignant black vs malignant white
+mb_mw <- data %>% select_if(grepl("M_B", names(.)) | grepl("M_W", names(.)))
+# Malignant black vs nonmalignant white
+mb_nw <- data %>% select_if(grepl("M_B", names(.)) | grepl("N_W", names(.)))
+# Malignant white vs nonmalignant white
+mw_nw <- data %>% select_if(grepl("M_W", names(.)) | grepl("N_W", names(.)))
+
+## combine into list of datasets
+all.dfs <- list("mb_nb" = mb_nb, "mw_nb" = mw_nb, "nb_nw" = nb_nw, "mb_mw" = mb_mw, "mb_nw" = mb_nw, "mw_nw" = mw_nw)
+```
+
+### Remove unwanted variation with `RUVg`
+
+First, filter out rows that don't meet the requirements of: more than 5 reads in at least 3 samples from each comparison
+
+```{r filter lowly expressed genes}
+all.dfs.filt <- lapply(all.dfs, function(df) df[apply(df, 1, function(x) length(x[x>5])>=3), ])
+```
+
+```{r}
+lapply(all.dfs.filt, head)
+```
+
+Create SeqExpressionSet objects from data frames
+
+```{r}
+make_sets <- function(df) {
+  x <- names(df) %>% str_extract("[MN]_[WB]") %>% as.factor()
+  set <- newSeqExpressionSet(as.matrix(df), phenoData = data.frame(x, row.names = colnames(df)))
+  return(set)
+}
+
+all.sets <- lapply(all.dfs.filt, function(x) make_sets(x))
+```
+
+```{r}
+str(all.sets$mb_nb)
+```
+
+#### EDA
+
+View PCA and RLE plots of the samples prior to normalization
+
+```{r}
+plot_sets <- function(set) {
+  x <- set$x
+  colors <- brewer.pal(3, "Set1")
+  plotRLE(set, outline = FALSE, ylim = c(-4,4), col = colors[x])
+  plotPCA(set, col = colors[x], cex = 0.7)
+}
+
+lapply(all.sets, function(set) plot_sets(set)) ## check plots
+```
+
+#### Run between lane (upper quartile) normalization and re-visualize
+
+```{r between lane normalization}
+all.sets.norm <- lapply(all.sets, function(set) betweenLaneNormalization(set, which = "upper"))
+
+lapply(all.sets.norm, function(set) plot_sets(set))
+```
+
+
+```{r view non-normalized count matrix}
+head(counts(all.sets.norm$mb_nb))
+```
+
+```{r view normmalized count matrix}
+head(normCounts(all.sets.norm$mb_nb))
+```
+
+### Create empirical negative control genes and Run DE analysis with `edgeR`
+
+Since no genes are known a priori to be influenced by covariates of interest, you can run a first-pass differential expression analysis and the least significantly DE genes found from the analysis can be used as negative controls for the second-pass differential expression analysis.
+
+```{r estimate negative controls}
+## write function to update SeqExpressionSet objects to have negative controls
+est_neg_ctrl <- function(set) {
+  x <- set$x
+  design <- model.matrix(~x, data = pData(set))
+  y <- DGEList(counts = counts(set), group = x)
+  y <- calcNormFactors(y, method = "upperquartile")
+  y <- estimateGLMCommonDisp(y, design)
+  y <- estimateGLMTagwiseDisp(y, design)
+
+  fit <- glmFit(y, design)
+  lrt <- glmLRT(fit, coef = 2)
+
+  top <- topTags(lrt, n = nrow(set))$table
+  empirical <- rownames(set)[which(!(rownames(set) %in% rownames(top)[1:5000]))]
+  
+  # run RUVg
+  newset <- RUVg(set, empirical, k = 1)
+  return(newset)
+}
+
+all.sets.norm.nc <- lapply(all.sets.norm, est_neg_ctrl)
+```
+
+```{r}
+lapply(all.sets.norm.nc, pData)
+```
+
+```{r}
+lapply(all.sets.norm.nc, plot_sets)
+```
+
+
+
+```{r}
+run_glmLRT <- function(newset) {
+  x <- newset$x
+  design <- model.matrix(~x + W_1, data = pData(newset))
+  y <- DGEList(counts = counts(newset), group = x)
+  y <- calcNormFactors(y, method = "upperquartile")
+  y <- estimateGLMCommonDisp(y, design)
+  y <- estimateGLMTagwiseDisp(y, design)
+
+  fit <- glmFit(y, design)
+  lrt <- glmLRT(fit, coef=2)
+  return(lrt)
+}
+
+all.res <- lapply(all.sets.norm.nc, run_glmLRT) ## all.res stores final edgeR results
+```
+
+```{r}
+all.res.df <- lapply(all.res, function(x) as.data.frame(topTags(x, n = nrow(x))))
+all.res.df
+```
+
+Add gene symbols to each dataframe of results
+
+```{r}
+addGeneSym <- function(df) {
+  # remove "." from ensembl gene id
+  rownames(df) <- sub("\\.[0-9]*$", "", rownames(df))
+  # map ensembl geneid to gene symbol
+  geneids <- ensembldb::select(x = EnsDb.Hsapiens.v86,  key=rownames(df), columns=c("SYMBOL"), keytype="GENEID")
+  rownames(geneids) <- geneids$GENEID
+  
+  # merge mapping back to original dataframe
+  df <- merge(x = df, y = geneids, by = "row.names", all = TRUE) %>%
+    column_to_rownames(var = "Row.names") %>%
+    relocate(SYMBOL, .before = logFC) %>%
+    select(!starts_with("GENEID"))
+  
+  return(df)
+}
+
+all.res.df.sym <- lapply(all.res.df, addGeneSym)
+all.res.df.sym <- lapply(all.res.df.sym, function(x) x %>% dplyr::arrange(FDR))
+```
+
+View DEGs for each comparison
+
+```{r}
+lapply(all.res.df.sym, head)
+```
+
+```{r}
+lapply(all.res.df.sym, function(x) x %>% filter(FDR < 0.1))
+```
+
+#### Try removing unwanted variation using `RUVr` method. This method considers residuals from a GLM regression of the counts on the covariates of interest.
+
+```{r}
+est_neg_ctrl2 <- function(set) {
+  x <- set$x
+  design <- model.matrix(~x, data = pData(set))
+  y <- DGEList(counts = counts(set), group = x)
+  y <- calcNormFactors(y, method = "upperquartile")
+  y <- estimateGLMCommonDisp(y, design)
+  y <- estimateGLMTagwiseDisp(y, design)
+
+  fit <- glmFit(y, design)
+  res <- residuals(fit, type = "deviance")
+  
+  # run RUVr
+  newset <- RUVSeq::RUVr(set, row.names(res), k = 1, res)
+  return(newset)
+}
+
+all.sets.norm.nc2 <- lapply(all.sets.norm, est_neg_ctrl2)
+```
+
+```{r}
+all.res2 <- lapply(all.sets.norm.nc2, run_glmLRT)
+all.res.df2 <- lapply(all.res2, function(x) as.data.frame(topTags(x, n = nrow(x))))
+all.res.df.sym2 <- lapply(all.res.df2, addGeneSym)
+all.res.df.sym2 <- lapply(all.res.df.sym2, function(x) x %>% dplyr::arrange(FDR))
+```
+
+```{r}
+lapply(all.res.df.sym, function(x) x %>% filter(FDR < 0.1))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
