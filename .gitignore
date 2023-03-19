@@ -9,3 +9,6 @@ Manifest/
 .DS_Store
 .Rproj.user/shared/notebooks/paths
 README.Rmd
+gene-lists/
+pathways/
+figures/
